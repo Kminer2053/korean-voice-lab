@@ -1,0 +1,9 @@
+# 서버(화면·HTTP API·명령줄·MCP). 모든 OS 공통. 엔진 패키지는 들어 있지 않다.
+gradio==6.30.0
+fastapi>=0.115
+uvicorn>=0.30
+numpy>=1.26
+huggingface_hub>=0.30
+mcp==2.3.0
+# M4A·MP3 등 녹음 변환(ffmpeg 내장 휠)
+av>=14

@@ -18,14 +18,13 @@ import local_env
 import audio_prep
 import engine
 import records
-import system_probe
+import backends
 import voices
 from audio_prep import UserInputError
 
 API_VERSION = "1"
 LEXICON_PATH = local_env.ROOT / "lexicon.json"
 MAX_TEXT_CHARS = 2000
-_RECORD_LOCK = threading.Lock()
 
 # 화면과 /api/health 가 함께 보는 상태.
 STATUS: dict[str, Any] = {"phase": "idle", "detail": "", "last": None}
@@ -43,6 +42,8 @@ class Result:
     generate_sec: float
     load_sec: float
     model: str
+    engine: str = ""
+    device: str = ""
     seed: int | None = None
     cached: bool = False
     id: str | None = None
@@ -62,6 +63,8 @@ class Result:
             "generate_sec": round(self.generate_sec, 3),
             "load_sec": round(self.load_sec, 3),
             "model": self.model,
+            "engine": self.engine,
+            "device": self.device,
             "seed": self.seed,
             "cached": self.cached,
         }
@@ -106,13 +109,22 @@ def _set_phase(name: str, detail: str = "") -> None:
     STATUS["detail"] = detail
 
 
+def engines() -> list[dict[str, Any]]:
+    return backends.all_status()
+
+
 def health() -> dict[str, Any]:
     styles = voices.list_styles()
+    default = backends.default_engine_id()
     return {
         "ok": True,
         "api_version": API_VERSION,
         "service": "qwen3-voice-lab",
-        "model": system_probe.MODEL_06,
+        "platform": backends.current_platform(),
+        "default_engine": default,
+        "engines": [{"id": e["id"], "family": e["family"], "available": e["available"]} for e in engines()],
+        "loaded_engine": engine.loaded_engine_id(),
+        "model": engine.loaded_model_id() or (backends.info(default).model_id if default else None),
         "model_loaded": engine.is_model_loaded(),
         "busy": engine.is_busy(),
         "phase": STATUS["phase"],
@@ -128,6 +140,7 @@ def synthesize(
     output_path: str | Path | None = None,
     ref_text: str | None = None,
     seed: int | None = None,
+    engine_name: str | None = None,
     replace: dict[str, str] | None = None,
     use_lexicon: bool = True,
     item_id: str | None = None,
@@ -150,8 +163,14 @@ def synthesize(
             f"'{chosen.label}({chosen.id})' 말투에 등록된 참조 녹음이 없습니다. 화면의 ① 목소리 등록에서 먼저 녹음하세요."
         )
     script = (ref_text or "").strip() or chosen.script.strip()
-    if not script:
-        raise UserInputError("참조 녹음의 대본이 비어 있습니다.")
+    try:
+        engine_id = engine.resolve_engine(engine_name)
+    except engine.ModelDisabled as exc:
+        raise UserInputError(str(exc)) from exc
+    if backends.info(engine_id).needs_ref_text and not script:
+        raise UserInputError(
+            f"{backends.info(engine_id).label} 엔진은 참조 녹음의 대본이 필요합니다. 목소리 등록 탭에서 읽은 문장을 적으세요."
+        )
     # use_lexicon=False 이고 replace 도 없으면 문장을 손대지 않고 그대로 읽는다(예전 /synthesize 동작).
     spoken = apply_lexicon(raw, replace, use_file=use_lexicon) if (use_lexicon or replace) else raw
     target = Path(output_path).expanduser().resolve() if output_path else None
@@ -163,11 +182,10 @@ def synthesize(
 
     try:
         report = engine.synthesize(
-            model_choice="0.6B",
+            engine=engine_id,
             ref_wav=ref_path,
             ref_text=script,
             text=spoken,
-            sentence_id=chosen.id,
             clip_label=chosen.label,
             on_phase=phase,
             output_path=target,
@@ -177,34 +195,31 @@ def synthesize(
     except Exception as exc:
         _set_phase("error", str(exc))
         raise
-    with _RECORD_LOCK:
-        try:
-            records.append_generation(
-                model_id=report.model_id,
-                model_choice="0.6B",
-                sentence_id=chosen.id,
-                reference_kind="user-upload",
-                reference_note=f"말투: {chosen.label}. 파일: {ref_path.name}.",
-                ref_duration_sec=report.ref_duration_sec,
-                output_duration_sec=report.output_duration_sec,
-                load_sec=report.load_sec,
-                generate_sec=report.generate_sec,
-                library_processing_time_sec=report.library_processing_time_sec,
-                library_real_time_factor=report.library_real_time_factor,
-                library_peak_memory_gb=report.library_peak_memory_gb,
-                mlx_peak_bytes=report.mlx_peak_bytes,
-                mlx_active_bytes=report.mlx_active_bytes,
-                sample_rate=report.sample_rate,
-                output_samples=report.output_samples,
-                output_path=str(report.output_path),
-                generation_text=raw,
-            )
-        except Exception as exc:  # 기록 실패가 생성 결과를 막지 않게 한다.
-            print(f"생성 기록을 남기지 못했습니다: {exc}", flush=True)
+    try:
+        records.append(
+            {
+                "engine_id": report.engine_id,
+                "model_id": report.model_id,
+                "device": report.device,
+                "style": chosen.id,
+                "reference_file": ref_path.name,
+                "ref_duration_sec": report.ref_duration_sec,
+                "output_duration_sec": report.output_duration_sec,
+                "load_sec": report.load_sec,
+                "generate_sec": report.generate_sec,
+                "peak_memory_bytes": report.peak_memory_bytes,
+                "sample_rate": report.sample_rate,
+                "output_samples": report.output_samples,
+                "output_path": str(report.output_path),
+                "generation_text": raw,
+            }
+        )
+    except Exception as exc:  # 기록 실패가 생성 결과를 막지 않게 한다.
+        print(f"생성 기록을 남기지 못했습니다: {exc}", flush=True)
     STATUS["last"] = {
         "generate_sec": float(report.generate_sec),
         "output_duration_sec": float(report.output_duration_sec),
-        "peak_bytes": int(report.mlx_peak_bytes),
+        "peak_bytes": report.peak_memory_bytes,
     }
     _set_phase("ready")
     return Result(
@@ -218,6 +233,8 @@ def synthesize(
         generate_sec=report.generate_sec,
         load_sec=report.load_sec,
         model=report.model_id,
+        engine=report.engine_id,
+        device=report.device,
         seed=seed,
         id=item_id,
     )
@@ -230,6 +247,7 @@ class BatchItem:
     id: str | None = None
     style: str | None = None
     seed: int | None = None
+    engine: str | None = None
     replace: dict[str, str] = field(default_factory=dict)
 
 
@@ -241,9 +259,11 @@ def parse_items(data: Any, default_style: str | None = None) -> list[BatchItem]:
     - {"style": "guide", "items": [...]}  (공통 말투)
     """
     common_style = default_style
+    common_engine: str | None = None
     common_replace: dict[str, str] = {}
     if isinstance(data, dict):
         common_style = data.get("style") or common_style
+        common_engine = data.get("engine")
         common_replace = dict(data.get("replace") or {})
         data = data.get("items") or data.get("lines") or data.get("texts")
     if not isinstance(data, list) or not data:
@@ -253,7 +273,7 @@ def parse_items(data: Any, default_style: str | None = None) -> list[BatchItem]:
         if isinstance(entry, str):
             if not entry.strip():
                 continue
-            items.append(BatchItem(text=entry.strip(), style=common_style, replace=common_replace))
+            items.append(BatchItem(text=entry.strip(), style=common_style, engine=common_engine, replace=common_replace))
             continue
         if not isinstance(entry, dict):
             raise UserInputError(f"{index}번째 항목이 문자열도 객체도 아닙니다.")
@@ -268,6 +288,7 @@ def parse_items(data: Any, default_style: str | None = None) -> list[BatchItem]:
                 id=str(entry["id"]) if entry.get("id") not in (None, "") else None,
                 style=entry.get("style") or common_style,
                 seed=entry.get("seed"),
+                engine=entry.get("engine") or common_engine,
                 replace=merged,
             )
         )
@@ -281,7 +302,7 @@ def safe_name(value: str) -> str:
     return cleaned[:60] or "item"
 
 
-def _item_digest(item: BatchItem, style: voices.Style) -> str:
+def _item_digest(item: BatchItem, style: voices.Style, engine_id: str) -> str:
     key = json.dumps(
         {
             "text": apply_lexicon(item.text, item.replace),
@@ -289,7 +310,7 @@ def _item_digest(item: BatchItem, style: voices.Style) -> str:
             "file": style.file,
             "script": style.script,
             "seed": item.seed,
-            "model": system_probe.MODEL_06,
+            "engine": engine_id,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -302,6 +323,7 @@ def run_batch(
     out_dir: str | Path,
     *,
     default_style: str | None = None,
+    default_engine: str | None = None,
     skip_existing: bool = True,
     on_item: Callable[[int, int, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -328,7 +350,11 @@ def run_batch(
         wav = folder / f"{key}.wav"
         try:
             style = voices.resolve(item.style or default_style)
-            digest = _item_digest(item, style)
+            try:
+                engine_id = engine.resolve_engine(item.engine or default_engine)
+            except engine.ModelDisabled as exc:
+                raise UserInputError(str(exc)) from exc
+            digest = _item_digest(item, style, engine_id)
             prev = manifest.get(key) or {}
             if skip_existing and wav.is_file() and prev.get("sha") == digest:
                 entry = dict(prev)
@@ -339,6 +365,7 @@ def run_batch(
                     style.id,
                     output_path=wav,
                     seed=item.seed,
+                    engine_name=engine_id,
                     replace=item.replace,
                     item_id=key,
                 )

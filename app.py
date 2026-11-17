@@ -24,9 +24,8 @@ from fastapi import FastAPI
 
 import api
 import engine
-import records
 import service
-import system_probe
+import backends
 import voices
 from audio_prep import UserInputError
 
@@ -54,7 +53,8 @@ def render_status_chip() -> str:
     elif info["phase"] == "error":
         label, kind = "오류", "err"
     elif info["model_loaded"]:
-        label, kind = "모델 준비됨", "ok"
+        loaded = backends.info(info["loaded_engine"]).label if info.get("loaded_engine") else "모델"
+        label, kind = f"{loaded} 준비됨", "ok"
     else:
         label, kind = "모델 대기(첫 생성 때 불러옴)", "idle"
     return (
@@ -131,7 +131,7 @@ def render_history(history: list[dict]) -> str:
         short = text if len(text) <= 60 else text[:58] + "…"
         rows.append(
             '<div class="vl-row">'
-            f'<span class="vl-tag">{_esc(item.get("style_label", ""))}</span>'
+            f'<span class="vl-tag" title="{_esc(item.get("engine", ""))}">{_esc(item.get("style_label", ""))}</span>'
             f'<span class="vl-text" title="{_esc(text)}">{_esc(short)}</span>'
             f'<span class="vl-dur">{float(item.get("duration_sec", 0)):.1f}초</span>'
             f'<audio controls preload="none" src="{_esc(url)}"></audio>'
@@ -139,6 +139,48 @@ def render_history(history: list[dict]) -> str:
             "</div>"
         )
     return '<div class="vl-hist">' + "".join(rows) + "</div>"
+
+
+RUNTIME_LABEL = {"mlx": "MLX(Apple Silicon)", "torch": "PyTorch"}
+
+
+def engine_choices() -> list[tuple[str, str]]:
+    """모델 계열마다 하나. 이 컴퓨터에서 가장 빠른 실행 방식이 자동으로 쓰인다."""
+    ready = backends.available_ids()
+    items = []
+    for family in backends.families():
+        members = [engine_id for engine_id in backends.family_members(family) if engine_id in ready]
+        if not members:
+            continue
+        info = backends.info(members[0])
+        name = info.label.split(" · ")[0]
+        items.append((f"{name} · {info.origin} · {info.license} · {RUNTIME_LABEL.get(info.runtime, info.runtime)}", family))
+    return items
+
+
+def default_family() -> str | None:
+    engine_id = backends.default_engine_id()
+    return backends.info(engine_id).family if engine_id else None
+
+
+def render_engine_table() -> str:
+    rows = [
+        "| 엔진 id | 모델 | 실행 방식 | 개발 주체(국가) | 라이선스 | 대본 필요 | 이 컴퓨터 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for item in backends.all_status():
+        state = "✅ 사용 가능" if item["available"] else f"— {item['reason']}"
+        rows.append(
+            f"| `{item['id']}` | {item['label'].split(' · ')[0]} | {RUNTIME_LABEL.get(item['runtime'], item['runtime'])} | "
+            f"{item['developer']} ({item['origin']}) | {item['license']} | {'예' if item['needs_ref_text'] else '아니오'} | {state} |"
+        )
+    default = backends.default_engine_id()
+    rows.append("")
+    rows.append(
+        f"기본 엔진: `{default}`. 모델(`qwen3`, `chatterbox`)로 고르면 이 컴퓨터에서 가장 빠른 실행 방식이 자동으로 쓰입니다"
+        " (맥은 MLX, 윈도우·리눅스는 PyTorch CUDA, GPU가 없으면 CPU)."
+    )
+    return "\n".join(rows)
 
 
 def style_choices() -> list[tuple[str, str]]:
@@ -176,7 +218,7 @@ def _run_with_phases(fn):
     yield ("done", holder["result"])
 
 
-def generate(consent: bool, style_id: str, text: str, per_line: bool, history: list[dict] | None):
+def generate(consent: bool, style_id: str, text: str, per_line: bool, engine_family: str | None, history: list[dict] | None):
     made = list(history or [])
     keep = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
 
@@ -204,7 +246,9 @@ def generate(consent: bool, style_id: str, text: str, per_line: bool, history: l
         for index, line in enumerate(lines, start=1):
             prefix = f"{index}/{total} · " if total > 1 else ""
             for kind, value in _run_with_phases(
-                lambda on_phase, line=line: service.synthesize(line, style_id, on_phase=on_phase)
+                lambda on_phase, line=line: service.synthesize(
+                    line, style_id, engine_name=engine_family, on_phase=on_phase
+                )
             ):
                 if kind == "phase":
                     label = "모델 불러오는 중(처음 한 번만 느립니다)" if value == "loading" else "음성 만드는 중"
@@ -312,7 +356,10 @@ def agent_snippets() -> dict[str, str]:
             "# 대사 목록(JSON·TXT) → 폴더에 WAV 여러 개 + manifest.json\n"
             ".venv/bin/python voicelab_cli.py batch lines.json -o ~/Desktop/narration -s guide\n"
             "# 말투 목록\n"
-            ".venv/bin/python voicelab_cli.py styles"
+            ".venv/bin/python voicelab_cli.py styles\n"
+            "# 엔진 목록(모델 × 실행 방식, 국가·라이선스) / 모델 지정\n"
+            ".venv/bin/python voicelab_cli.py engines\n"
+            '.venv/bin/python voicelab_cli.py say "안녕하세요" -s talk -e chatterbox -o hello_cb.wav'
         ),
         "lines": json.dumps(
             {"style": "guide", "items": [
@@ -329,9 +376,13 @@ def agent_snippets() -> dict[str, str]:
             f"# 여러 문장 한 번에(서버가 out_dir 에 WAV 와 manifest.json 을 씀)\n"
             f"curl -s -X POST {url}/api/batch -H 'Content-Type: application/json' \\\n"
             "  -d '{\"style\":\"guide\",\"out_dir\":\"/tmp/narration\",\"items\":[\"첫 문장\",\"둘째 문장\"]}'\n\n"
-            f"# 상태와 말투\n"
+            f"# 모델 고르기: engine 에 qwen3 또는 chatterbox (실행 방식은 자동)\n"
+            f"curl -s -X POST {url}/api/tts -H 'Content-Type: application/json' \\\n"
+            "  -d '{\"text\":\"안녕하세요\",\"style\":\"talk\",\"engine\":\"chatterbox\"}' -o hello_cb.wav\n\n"
+            f"# 상태·말투·엔진\n"
             f"curl -s {url}/api/health\n"
-            f"curl -s {url}/api/styles"
+            f"curl -s {url}/api/styles\n"
+            f"curl -s {url}/api/engines"
         ),
         "python": (
             "import json, urllib.request\n"
@@ -365,6 +416,7 @@ AGENT_PROMPTS = """
 - “`plan.json` 의 대사를 voicelab MCP로 **안내** 말투로 만들어 `voice/` 폴더에 넣어 줘. 대사 id를 파일 이름으로 써.”
 - “쿠키 영상 대사 5개를 **대화** 말투로 만들고, 각 길이(초)를 표로 정리해 줘.”
 - “`배지`는 `뺏지`로 읽게 발음 사전에 넣고 03번 대사만 다시 만들어 줘.”
+- “같은 대사를 **qwen3**와 **chatterbox** 두 모델로 만들어 비교할 수 있게 폴더를 나눠 줘.”
 
 **알아 두면 좋은 점**
 
@@ -381,7 +433,8 @@ def check_connection() -> str:
     missing = [f"{s['label']}({s['id']})" for s in info["styles"] if not s["ready"]]
     lines = [
         f"✅ 서버 응답 정상 · {SERVER['url']} · API 버전 {info['api_version']}",
-        f"모델: `{info['model']}` · {'메모리에 있음' if info['model_loaded'] else '첫 생성 때 불러옴'}",
+        f"기본 엔진: `{info['default_engine']}` · 모델 `{info['model']}` · {'메모리에 있음' if info['model_loaded'] else '첫 생성 때 불러옴'}",
+        f"이 컴퓨터에서 쓸 수 있는 엔진: {', '.join(e['id'] for e in info['engines'] if e['available']) or '없음'}",
         f"쓸 수 있는 말투: {', '.join(ready) if ready else '없음 — 목소리 등록 탭에서 먼저 녹음하세요'}",
     ]
     if missing:
@@ -537,6 +590,12 @@ def build_demo() -> gr.Blocks:
                             show_label=False,
                             elem_id="vl-style",
                         )
+                        engine_pick = gr.Radio(
+                            choices=engine_choices(),
+                            value=default_family(),
+                            label="모델 · 개발 주체 · 라이선스 · 실행 방식(이 컴퓨터에서 가장 빠른 방식 자동)",
+                            elem_id="vl-engine",
+                        )
                         gr.HTML('<div class="vl-sec">④ 만들기</div>')
                         with gr.Row(equal_height=True):
                             consent = gr.Checkbox(value=False, label=CONSENT_LABEL, scale=3)
@@ -570,7 +629,7 @@ def build_demo() -> gr.Blocks:
                         reg_audio = gr.Audio(
                             sources=["microphone", "upload"], type="filepath", show_label=False, buttons=["download"]
                         )
-                        gr.HTML('<div class="vl-sec">3. 녹음에서 실제로 읽은 문장</div>')
+                        gr.HTML('<div class="vl-sec">3. 녹음에서 실제로 읽은 문장 <small>Qwen3 모델이 씁니다. Chatterbox는 녹음만 씁니다</small></div>')
                         reg_script = gr.Textbox(
                             value=first[1], show_label=False, lines=3,
                             info="다르게 읽었다면 실제로 말한 대로 고치세요. 억양 지시문은 넣지 않습니다.",
@@ -608,6 +667,8 @@ def build_demo() -> gr.Blocks:
                         "<small>영상 내레이션 대사를 한꺼번에 뽑을 때 편합니다</small></div>"
                     )
                     gr.HTML(AGENT_DIAGRAM)
+                    with gr.Accordion("엔진 목록 — 모델 × 실행 방식, 개발 주체 국가·라이선스", open=False):
+                        gr.Markdown(render_engine_table())
                     with gr.Row():
                         check = gr.Button("연결 확인", size="sm", variant="secondary", scale=0, min_width=120)
                         check_out = gr.Markdown("")
@@ -665,7 +726,7 @@ def build_demo() -> gr.Blocks:
         to_register.click(lambda: gr.Tabs(selected="register"), outputs=[tabs], queue=False, api_visibility="private")
         go.click(
             generate,
-            inputs=[consent, style, text, per_line, history_state],
+            inputs=[consent, style, text, per_line, engine_pick, history_state],
             outputs=[result_audio, gen_status, history_html, history_state, steps, status_chip],
             api_visibility="private",
             concurrency_limit=1,
@@ -747,11 +808,11 @@ def main() -> None:
         print(f"⚠️ {args.port}번 포트를 다른 프로그램이 쓰고 있어 {port}번을 씁니다. "
               "7860을 부르는 도구는 주소를 바꿔야 합니다.", flush=True)
     SERVER["url"] = f"http://127.0.0.1:{port}"
-    records.write_comparison()
     app = create_app()
     print(f"화면: {SERVER['url']}", flush=True)
     print(f"API 문서: {SERVER['url']}/docs", flush=True)
-    print(f"모델: {system_probe.MODEL_06} (첫 생성 때 불러옵니다)", flush=True)
+    default = backends.default_engine_id()
+    print(f"기본 엔진: {default} — 쓸 수 있는 엔진: {', '.join(backends.available_ids()) or '없음'} (첫 생성 때 불러옵니다)", flush=True)
     print("외부 공유는 켜지 않습니다. 이 컴퓨터에서만 열립니다.", flush=True)
     if args.open:
         threading.Timer(1.5, lambda: webbrowser.open(SERVER["url"])).start()

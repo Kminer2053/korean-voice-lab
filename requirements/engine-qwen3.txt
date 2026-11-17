@@ -1,0 +1,3 @@
+# qwen3-torch 엔진 전용 가상환경(.venv-qwen3). PyTorch 는 setup 스크립트가 먼저 설치한다.
+# qwen-tts 가 transformers==4.57.3 을 고정하므로 chatterbox 와도 나눈다.
+qwen-tts==0.1.1

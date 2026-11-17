@@ -55,30 +55,39 @@ def _styles() -> dict[str, Any]:
     return {"ok": True, "styles": [s.public_dict() for s in voices.list_styles()]}
 
 
-def _speak(text: str, style: str, output_path: str | None, seed: int | None) -> dict[str, Any]:
+def _engines() -> dict[str, Any]:
+    base = _base()
+    if base:
+        return cli._http("GET", base + "/api/engines")
+    import backends
+
+    return {"ok": True, "default_engine": backends.default_engine_id(), "engines": backends.all_status()}
+
+
+def _speak(text: str, style: str, output_path: str | None, seed: int | None, engine: str | None) -> dict[str, Any]:
     out = str(Path(output_path).expanduser().resolve()) if output_path else None
     base = _base()
     if base:
         return cli._http(
             "POST", base + "/api/tts",
-            {"text": text, "style": style, "format": "json", "output_path": out, "seed": seed},
+            {"text": text, "style": style, "engine": engine, "format": "json", "output_path": out, "seed": seed},
         )
     import service
 
-    return service.synthesize(text, style, output_path=out, seed=seed).to_dict()
+    return service.synthesize(text, style, output_path=out, seed=seed, engine_name=engine).to_dict()
 
 
-def _batch(items: list[Any], out_dir: str, style: str | None, force: bool) -> dict[str, Any]:
+def _batch(items: list[Any], out_dir: str, style: str | None, force: bool, engine: str | None) -> dict[str, Any]:
     folder = str(Path(out_dir).expanduser().resolve())
     base = _base()
     if base:
         return cli._http(
             "POST", base + "/api/batch",
-            {"items": items, "style": style, "out_dir": folder, "skip_existing": not force},
+            {"items": items, "style": style, "engine": engine, "out_dir": folder, "skip_existing": not force},
         )
     import service
 
-    parsed = service.parse_items(items, default_style=style)
+    parsed = service.parse_items({"items": items, "engine": engine}, default_style=style)
     return service.run_batch(parsed, folder, default_style=style, skip_existing=not force)
 
 
@@ -89,25 +98,37 @@ async def list_styles() -> dict[str, Any]:
 
 
 @server.tool()
-async def speak(text: str, style: str = "default", output_path: str | None = None, seed: int | None = None) -> dict[str, Any]:
+async def list_engines() -> dict[str, Any]:
+    """엔진(모델 × 실행 방식) 목록. available=true 인 것만 쓸 수 있다. 모델 계열(qwen3, chatterbox)로 고르면 이 컴퓨터에서 가장 빠른 실행 방식(맥 MLX, 윈도우 CUDA)이 자동으로 쓰인다. 개발 주체 국가·라이선스도 함께 나온다."""
+    return await anyio.to_thread.run_sync(_call, _engines)
+
+
+@server.tool()
+async def speak(
+    text: str, style: str = "default", output_path: str | None = None, seed: int | None = None, engine: str | None = None
+) -> dict[str, Any]:
     """문장 하나를 사용자 목소리로 읽어 WAV 하나를 만든다.
 
     text: 읽을 한국어 문장(2000자 이하). style: 말투 id 또는 이름(예: talk, 대화, guide, 안내).
     output_path: 결과 WAV 절대 경로(없으면 프로젝트 outputs/). seed: 같은 결과를 다시 얻고 싶을 때.
-    반환: {ok, path, duration_sec, sample_rate, style, ...}
+    engine: qwen3 · chatterbox 또는 정확한 엔진 id. 없으면 기본 엔진.
+    반환: {ok, path, duration_sec, sample_rate, style, engine, ...}
     """
-    return await anyio.to_thread.run_sync(_call, _speak, text, style, output_path, seed)
+    return await anyio.to_thread.run_sync(_call, _speak, text, style, output_path, seed, engine)
 
 
 @server.tool()
-async def speak_batch(items: list[Any], out_dir: str, style: str | None = None, force: bool = False) -> dict[str, Any]:
+async def speak_batch(
+    items: list[Any], out_dir: str, style: str | None = None, force: bool = False, engine: str | None = None
+) -> dict[str, Any]:
     """대사 여러 개를 한 번에 만든다. 항목마다 out_dir/<id>.wav 하나, 그리고 out_dir/manifest.json.
 
     items: ["문장", ...] 또는 [{"id": "s01", "text": "문장", "style": "talk"}, ...]
-    style: 항목에 style 이 없을 때 쓸 말투. force: 이미 만든 같은 문장도 다시 만든다(기본은 재사용).
+    style: 항목에 style 이 없을 때 쓸 말투. engine: 항목에 engine 이 없을 때 쓸 모델·엔진.
+    force: 이미 만든 같은 문장도 다시 만든다(기본은 재사용).
     반환: {ok, succeeded, failed, items: [{id, ok, path, duration_sec, error?}], manifest}
     """
-    return await anyio.to_thread.run_sync(_call, _batch, items, out_dir, style, force)
+    return await anyio.to_thread.run_sync(_call, _batch, items, out_dir, style, force, engine)
 
 
 @server.tool()

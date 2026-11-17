@@ -76,14 +76,15 @@ def read_items(path: str) -> Any:
 def cmd_say(args, base: str | None) -> dict:
     out = str(Path(args.output).expanduser().resolve()) if args.output else None
     if base:
-        body = {"text": args.text, "style": args.style, "format": "json", "seed": args.seed, "output_path": out}
+        body = {"text": args.text, "style": args.style, "engine": args.engine, "format": "json", "seed": args.seed, "output_path": out}
         if args.no_lexicon:
             body["use_lexicon"] = False
         return _http("POST", base + "/api/tts", body)
     import service
 
     result = service.synthesize(
-        args.text, args.style, output_path=out, seed=args.seed, use_lexicon=not args.no_lexicon
+        args.text, args.style, output_path=out, seed=args.seed, engine_name=args.engine,
+        use_lexicon=not args.no_lexicon,
     )
     return result.to_dict()
 
@@ -94,17 +95,25 @@ def cmd_batch(args, base: str | None) -> dict:
     if base:
         body: dict[str, Any] = {"out_dir": out_dir, "skip_existing": not args.force, "format": "json"}
         if isinstance(data, dict):
-            body.update({k: v for k, v in data.items() if k in {"items", "style", "replace"}})
+            body.update({k: v for k, v in data.items() if k in {"items", "style", "engine", "replace"}})
             if args.style:
                 body["style"] = args.style
+            if args.engine:
+                body["engine"] = args.engine
         else:
             body["items"] = data
             body["style"] = args.style
+            body["engine"] = args.engine
         if not args.quiet:
             print(f"서버({base})에 {len(body.get('items') or [])}개를 보냅니다. 끝나면 결과를 보여 줍니다.", file=sys.stderr)
         return _http("POST", base + "/api/batch", body)
     import service
 
+    if args.engine:
+        if isinstance(data, dict):
+            data = {**data, "engine": args.engine}
+        else:
+            data = {"items": data, "engine": args.engine}
     items = service.parse_items(data, default_style=args.style)
 
     def progress(index: int, total: int, entry: dict) -> None:
@@ -122,6 +131,15 @@ def cmd_styles(args, base: str | None) -> dict:
     import voices
 
     return {"ok": True, "styles": [s.public_dict() for s in voices.list_styles()]}
+
+
+def cmd_engines(args, base: str | None) -> dict:
+    if base:
+        return _http("GET", base + "/api/engines")
+    import backends
+
+    return {"ok": True, "platform": backends.current_platform(), "default_engine": backends.default_engine_id(),
+            "engines": backends.all_status()}
 
 
 def cmd_register(args, base: str | None) -> dict:
@@ -151,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-s", "--style", default="default", help="말투 id 또는 이름(default/talk/guide/joy, 기본/대화/안내/기쁨)")
     p.add_argument("-o", "--output", help="결과 WAV 경로(없으면 outputs/)")
     p.add_argument("--seed", type=int)
+    p.add_argument("-e", "--engine", help="모델(qwen3, chatterbox) 또는 엔진 id(qwen3-mlx, chatterbox-torch 등). 없으면 기본 엔진")
     p.add_argument("--no-lexicon", action="store_true", help="발음 사전(lexicon.json)을 쓰지 않음")
     p.set_defaults(func=cmd_say)
 
@@ -158,11 +177,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("file", help=".json / .jsonl / .txt, 또는 - (표준 입력)")
     p.add_argument("-o", "--output", required=True, help="결과 폴더")
     p.add_argument("-s", "--style", help="항목에 style 이 없을 때 쓸 말투")
+    p.add_argument("-e", "--engine", help="항목에 engine 이 없을 때 쓸 모델·엔진")
     p.add_argument("--force", action="store_true", help="이미 만든 같은 문장도 다시 만듦")
     p.set_defaults(func=cmd_batch)
 
     p = sub.add_parser("styles", help="말투 목록과 등록 상태")
     p.set_defaults(func=cmd_styles)
+
+    p = sub.add_parser("engines", help="엔진(모델 × 실행 방식) 목록과 이 컴퓨터에서 쓸 수 있는지")
+    p.set_defaults(func=cmd_engines)
 
     p = sub.add_parser("register", help="참조 녹음(WAV/M4A)을 말투에 등록")
     p.add_argument("style", help="말투 id(default/talk/guide/joy 또는 새 id)")

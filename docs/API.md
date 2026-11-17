@@ -21,6 +21,12 @@
 
 말투마다 참조 녹음이 등록되어 있어야 합니다(`ready: true`). 등록되지 않은 말투로 요청하면 400을 돌려줍니다.
 
+## 모델(engine) 지정
+
+`engine`에는 모델 계열(`qwen3`, `chatterbox`)이나 정확한 엔진 id(`qwen3-mlx`, `qwen3-torch`, `chatterbox-mlx`, `chatterbox-torch`)를 씁니다.
+계열로 쓰면 이 컴퓨터에서 가장 빠른 실행 방식이 고르고(맥 MLX → PyTorch), 비우거나 `auto`면 기본 엔진을 씁니다. 목록과 이유는 `GET /api/engines`에서 봅니다. 자세한 내용은 [ENGINES.md](ENGINES.md)에 있습니다.
+설치되지 않은 엔진을 요청하면 400과 함께 이유를 돌려줍니다.
+
 ## 오류 형식
 
 ```json
@@ -38,6 +44,10 @@
   "ok": true,
   "api_version": "1",
   "service": "qwen3-voice-lab",
+  "platform": "mac-arm64",
+  "default_engine": "qwen3-mlx",
+  "engines": [{"id": "qwen3-mlx", "family": "qwen3", "available": true}, {"id": "chatterbox-mlx", "family": "chatterbox", "available": true}],
+  "loaded_engine": null,
   "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
   "model_loaded": false,
   "busy": false,
@@ -56,6 +66,19 @@
 ]}
 ```
 
+## `GET /api/engines`
+
+```json
+{"ok": true, "platform": "windows", "default_engine": "chatterbox-torch", "engines": [
+  {"id": "chatterbox-torch", "family": "chatterbox", "runtime": "torch", "label": "Chatterbox 다국어 v3 · PyTorch",
+   "model_id": "ResembleAI/chatterbox (t3 v3)", "developer": "Resemble AI", "origin": "미국", "license": "MIT",
+   "commercial_use": true, "platforms": ["windows", "linux", "mac-arm64"], "needs_ref_text": false,
+   "approx_download_gb": 3.2, "available": true, "reason": "사용 가능", "runs_in": "worker:C:\\…\\.venv-chatterbox\\Scripts\\python.exe"}
+]}
+```
+
+`?refresh=true`면 설치 상태를 다시 확인합니다. `PUT /api/engines/default`에 `{"engine": "chatterbox"}`를 보내면 기본 엔진을 바꿉니다(`settings.json`에 저장).
+
 ## `POST /api/tts`: 문장 하나를 WAV 하나로
 
 요청(JSON):
@@ -64,6 +87,7 @@
 |---|---|---|---|
 | `text` | string | 필수 | 읽을 문장. 2000자 이하. 줄바꿈이 있으면 모델이 나눠 읽고 하나로 이어 붙입니다. |
 | `style` | string | `default` | 말투. `style_id`, `voice`도 같은 뜻으로 받습니다. |
+| `engine` | string | 기본 엔진 | 모델 계열 또는 엔진 id(위 참고) |
 | `format` | `wav` \| `json` \| `base64` | `wav` | 응답 형식 |
 | `seed` | int | 없음 | 같은 seed, 같은 입력이면 같은 결과를 기대할 수 있습니다. |
 | `replace` | object | 없음 | 이 요청에만 쓰는 발음 치환 `{"배지": "뺏지"}` |
@@ -74,7 +98,7 @@
 
 응답:
 
-- `format: "wav"`: 본문이 WAV(`audio/wav`)입니다. 헤더는 `X-Duration-Sec`, `X-Sample-Rate`, `X-Style`, 그리고 퍼센트 인코딩된 `X-Output-Path`·`X-Output-File`입니다.
+- `format: "wav"`: 본문이 WAV(`audio/wav`)입니다. 헤더는 `X-Duration-Sec`, `X-Sample-Rate`, `X-Style`, `X-Engine`, 그리고 퍼센트 인코딩된 `X-Output-Path`·`X-Output-File`입니다.
 - `format: "json"`:
 
 ```json
@@ -85,7 +109,8 @@
   "style": "talk", "style_label": "대화",
   "text": "원문", "spoken_text": "발음 사전 적용 뒤 실제로 읽힌 문장",
   "duration_sec": 3.04, "sample_rate": 24000, "generate_sec": 1.6, "load_sec": 0.0,
-  "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit", "seed": null, "cached": false
+  "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit", "engine": "qwen3-mlx", "device": "mlx-metal",
+  "seed": null, "cached": false
 }
 ```
 
@@ -104,15 +129,16 @@
 
 | 필드 | 형식 | 기본값 | 설명 |
 |---|---|---|---|
-| `items` | array | 필수 | `["문장", …]` 또는 `[{"id", "text", "style", "seed", "replace"}, …]`. 섞어 써도 됩니다. |
+| `items` | array | 필수 | `["문장", …]` 또는 `[{"id", "text", "style", "engine", "seed", "replace"}, …]`. 섞어 써도 됩니다. |
 | `style` | string | `default` | 항목에 `style`이 없을 때 쓸 말투 |
+| `engine` | string | 기본 엔진 | 항목에 `engine`이 없을 때 쓸 모델·엔진 |
 | `replace` | object | 없음 | 모든 항목에 쓰는 발음 치환 |
 | `out_dir` | string | `outputs/batch-시각` | 결과 폴더(절대 경로, 서버와 같은 컴퓨터) |
 | `skip_existing` | bool | `true` | 같은 문장·말투·참조 녹음·seed로 이미 만든 파일은 다시 만들지 않습니다. |
 | `format` | `json` \| `zip` | `json` | `zip`이면 WAV와 manifest를 묶어 본문으로 돌려줍니다. |
 
 파일 이름은 `id`가 있으면 `<id>.wav`(안전한 글자만 남김), 없으면 `001.wav`, `002.wav`처럼 순번입니다.
-`out_dir/manifest.json`에 항목별 결과와 입력 해시(`sha`)를 남깁니다. 재사용 판단은 이 해시로 합니다.
+`out_dir/manifest.json`에 항목별 결과와 입력 해시(`sha`)를 남깁니다. 재사용 판단은 이 해시로 하고, 해시에는 엔진 id도 들어갑니다(엔진을 바꾸면 다시 만듦).
 
 응답(`format: "json"`):
 
@@ -167,7 +193,7 @@ audio_path, info, file_path, status = client.predict(
 |---|---|---|
 | `consent` | `False` | `True`여야 만듭니다. |
 | `style_id` | `default` | `default`/`talk`/`guide`/`joy` |
-| `gen_text` | 필수 | 읽을 문장. 발음 사전을 적용하지 않고 그대로 읽습니다. |
+| `gen_text` | 필수 | 읽을 문장. 발음 사전을 적용하지 않고 그대로 읽습니다. 엔진은 기본 엔진입니다. |
 | `differed_<역할>`, `edit_<역할>` | `False`, 필수 | 역할은 `timbre`(=default), `question`(=talk), `guide`, `joy`. `differed`가 `True`이면 그 역할의 참조 대본을 `edit` 값으로 바꿉니다. |
 
 반환은 `(결과 WAV 경로, 정보 문자열, 결과 WAV 경로, 상태 문자열)`입니다. 새 코드에서는 `/api/tts`를 쓰세요.

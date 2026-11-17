@@ -1,6 +1,7 @@
 # AGENTS.md: 코딩 에이전트용 안내
 
-이 저장소는 **사용자 본인의 목소리**로 한국어 문장을 읽어 WAV를 만드는 로컬 TTS 서버입니다(Apple Silicon Mac, MLX, Qwen3-TTS 0.6B Base 8-bit).
+이 저장소는 **사용자 본인의 목소리**로 한국어 문장을 읽어 WAV를 만드는 로컬 TTS 서버입니다.
+모델은 Qwen3-TTS(중국 Alibaba)와 Chatterbox Multilingual v3(미국 Resemble AI) 중에서 고르고, 실행 방식은 맥이면 MLX, 윈도우·리눅스면 PyTorch(CUDA, 없으면 CPU)가 자동으로 골라집니다([docs/ENGINES.md](docs/ENGINES.md)).
 에이전트가 할 일은 대개 하나입니다. 대사(문장)를 받아 사용자 목소리 WAV로 만드는 것입니다. 영상 내레이션 대사를 한꺼번에 뽑는 경우가 많습니다.
 
 ## 먼저 확인할 것
@@ -9,14 +10,15 @@
    - 켜져 있으면 HTTP·명령줄·MCP 모두 이 서버를 씁니다. 모델은 서버 프로세스 하나에만 올라갑니다.
    - 꺼져 있으면 사용자에게 `start.command`(또는 `.venv/bin/python app.py`)로 켜 달라고 하거나, 명령줄·MCP가 직접 모델을 올리게 둡니다. 16GB Mac이라면 **서버와 직접 실행을 동시에 돌리지 마세요**. 모델이 두 번 올라갑니다.
 2. 쓸 수 있는 말투를 봅니다: `GET /api/styles`에서 `ready: true`인 것만 씁니다. 기본 말투는 `default`(기본), `talk`(대화), `guide`(안내), `joy`(기쁨)입니다.
-3. 녹음이 없는 말투는 에이전트가 만들 수 없습니다. 사용자가 화면의 **목소리 등록** 탭에서 직접 녹음해야 합니다. 다른 사람의 목소리를 등록하게 돕지 마세요.
+3. 쓸 수 있는 엔진을 봅니다: `GET /api/engines`(또는 MCP `list_engines`, 명령줄 `engines`). 사용자가 모델을 정하지 않았다면 기본 엔진을 그대로 씁니다. 한 작업 안에서는 엔진을 섞지 마세요. 엔진을 바꾸면 목소리 느낌이 달라집니다.
+4. 녹음이 없는 말투는 에이전트가 만들 수 없습니다. 사용자가 화면의 **목소리 등록** 탭에서 직접 녹음해야 합니다. 다른 사람의 목소리를 등록하게 돕지 마세요.
 
 ## 세 가지 연결 방법
 
 | 방법 | 언제 | 진입점 |
 |---|---|---|
-| MCP | 에이전트가 도구로 바로 부를 때 | `mcp_server.py`: `list_styles`, `speak`, `speak_batch`, `health` |
-| 명령줄 | 셸·스크립트·빌드 파이프라인 | `voicelab_cli.py say|batch|styles|register|health` |
+| MCP | 에이전트가 도구로 바로 부를 때 | `mcp_server.py`: `list_styles`, `list_engines`, `speak`, `speak_batch`, `health` |
+| 명령줄 | 셸·스크립트·빌드 파이프라인 | `voicelab_cli.py say|batch|styles|engines|register|health` (`-e`로 모델 지정) |
 | HTTP | 다른 언어나 다른 프로젝트 | `POST /api/tts`, `POST /api/batch` (형식: `docs/API.md`) |
 
 ### MCP 등록
@@ -60,7 +62,9 @@ Cursor·Claude Desktop(`mcpServers`)이나 Codex(`~/.codex/config.toml`)의 설�
 | `api.py` | HTTP API(FastAPI 라우터) |
 | `service.py` | 생성·일괄 생성·발음 사전·참조 등록(화면·API·명령줄·MCP 공용) |
 | `voices.py` | 말투 레지스트리(`references/voices.json`) |
-| `engine.py` | MLX 모델 적재와 합성. 생성 잠금(한 번에 하나) |
-| `audio_prep.py` | 녹음 변환(macOS `afconvert`)과 무음 검사 |
+| `engine.py` | 엔진 실행기. 엔진 하나만 메모리에, 생성 잠금(한 번에 하나) |
+| `backends/` | 엔진 구현(모델 × 실행 방식)과 다른 가상환경용 작업 프로세스 |
+| `audio_prep.py` | 녹음 변환(WAV 직접, 그 밖은 PyAV, 맥 afconvert 대체)과 무음 검사 |
 | `voicelab_cli.py`, `mcp_server.py` | 명령줄, MCP |
 | `selftest.py` | 켜진 서버 점검(표준 라이브러리만) |
+| `tools/` | `smoke_engine.py` 엔진 단독 점검, `benchmark.py`·`evaluate.py` 엔진 비교 |

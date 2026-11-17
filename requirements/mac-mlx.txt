@@ -1,0 +1,4 @@
+# 맥(Apple Silicon): 서버 + MLX 엔진(qwen3-mlx, chatterbox-mlx). 한 가상환경(.venv)에 함께 설치한다.
+-r server.txt
+mlx==0.32.4
+mlx-audio==0.6.1

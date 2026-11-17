@@ -33,6 +33,10 @@ class TTSRequest(BaseModel):
     style: str | None = Field(None, description="말투 id 또는 이름. 예: talk, 대화, '대화(talk)'")
     style_id: str | None = Field(None, description="style 의 다른 이름(예전 호출 호환)")
     voice: str | None = Field(None, description="style 의 다른 이름")
+    engine: str | None = Field(
+        None,
+        description="모델: qwen3·chatterbox(이 컴퓨터에서 가장 빠른 실행 방식 자동) 또는 정확한 엔진 id(qwen3-mlx, chatterbox-torch 등). 없으면 기본 엔진",
+    )
     format: Literal["wav", "json", "base64"] = "wav"
     seed: int | None = None
     replace: dict[str, str] | None = Field(None, description="이번 요청에만 쓰는 발음 치환 {원문: 소리}")
@@ -48,6 +52,7 @@ class TTSRequest(BaseModel):
 class BatchRequest(BaseModel):
     items: list[Any] = Field(..., description='["문장", ...] 또는 [{"id","text","style","seed","replace"}, ...]')
     style: str | None = None
+    engine: str | None = Field(None, description="항목에 engine 이 없을 때 쓸 모델·엔진")
     replace: dict[str, str] | None = None
     out_dir: str | None = Field(None, description="결과 폴더(서버 컴퓨터). 없으면 outputs/batch-시각")
     skip_existing: bool = True
@@ -82,6 +87,7 @@ def _tts_response(req: TTSRequest):
         req.style_name(),
         output_path=req.output_path,
         seed=req.seed,
+        engine_name=req.engine,
         replace=req.replace,
         use_lexicon=req.use_lexicon,
         ref_text=req.ref_text,
@@ -102,6 +108,7 @@ def _tts_response(req: TTSRequest):
         "X-Duration-Sec": f"{result.duration_sec:.3f}",
         "X-Sample-Rate": str(result.sample_rate),
         "X-Style": result.style,
+        "X-Engine": result.engine,
     }
     return Response(result.path.read_bytes(), media_type="audio/wav", headers=headers)
 
@@ -114,6 +121,36 @@ def health():
 @router.get("/api/styles")
 def styles():
     return {"ok": True, "styles": [s.public_dict() for s in voices.list_styles()]}
+
+
+@router.get("/api/engines")
+def engines(refresh: bool = False):
+    """엔진(모델 × 실행 방식) 목록. 개발 주체 국가·라이선스·이 컴퓨터에서 쓸 수 있는지."""
+    import backends
+
+    return {
+        "ok": True,
+        "platform": backends.current_platform(),
+        "default_engine": backends.default_engine_id(),
+        "engines": backends.all_status(refresh=refresh),
+    }
+
+
+class DefaultEngine(BaseModel):
+    engine: str
+
+
+@router.put("/api/engines/default")
+def set_default_engine(body: DefaultEngine):
+    import backends
+    import engine as engine_mod
+
+    try:
+        engine_id = engine_mod.resolve_engine(body.engine)
+    except engine_mod.ModelDisabled as exc:
+        return _error(400, str(exc))
+    backends.save_settings({"default_engine": engine_id})
+    return {"ok": True, "default_engine": engine_id}
 
 
 @router.post("/api/tts")
@@ -152,7 +189,10 @@ async def tts_compat(request: Request):
 
 @router.post("/api/batch")
 def batch(req: BatchRequest):
-    items, err = _run(service.parse_items, {"items": req.items, "style": req.style, "replace": req.replace or {}})
+    items, err = _run(
+        service.parse_items,
+        {"items": req.items, "style": req.style, "engine": req.engine, "replace": req.replace or {}},
+    )
     if err is not None:
         return err
     try:

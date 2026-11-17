@@ -2,10 +2,12 @@
 references/
 outputs/
 lexicon.json
+settings.json
 local/
 
 # 환경·캐시
 .venv/
+.venv-*/
 .cache/
 __pycache__/
 *.py[cod]

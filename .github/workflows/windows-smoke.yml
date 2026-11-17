@@ -1,0 +1,92 @@
+name: windows-smoke
+
+# Windows 에서 설치(setup.bat) → 엔진 작업 프로세스 → 서버·HTTP API 까지 실제로 돌려 본다.
+# GitHub 기본 Windows 러너에는 GPU가 없어 CPU PyTorch 로 Chatterbox 를 검증한다.
+# 참조 녹음은 Windows 내장 음성(SAPI)으로 만든 시험용 영어 문장이다(사람 목소리 아님).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "backends/**"
+      - "engine.py"
+      - "service.py"
+      - "audio_prep.py"
+      - "app.py"
+      - "api.py"
+      - "requirements/**"
+      - "setup.bat"
+      - "start.bat"
+      - "tools/smoke_engine.py"
+      - ".github/workflows/windows-smoke.yml"
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m compileall -q .
+
+  chatterbox-cpu:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      VOICELAB_WITH_QWEN: "n"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: .cache/huggingface
+          key: hf-chatterbox-v3-${{ runner.os }}
+
+      - name: setup.bat (서버 .venv + .venv-chatterbox, CPU PyTorch)
+        shell: cmd
+        env:
+          PYTHON: ${{ steps.py.outputs.python-path }}
+        run: call setup.bat
+
+      - name: 시험용 참조 녹음 만들기(Windows SAPI)
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Speech
+          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $s.SetOutputToWaveFile("$PWD\ci_ref.wav")
+          $s.Speak("This is a short reference recording made only for automated testing. It is not a real person.")
+          $s.Dispose()
+
+      - name: 말투 등록 + 엔진 단독 생성(작업 프로세스 경유)
+        shell: cmd
+        run: |
+          .venv\Scripts\python voicelab_cli.py -q register talk ci_ref.wav --script "This is a short reference recording made only for automated testing."
+          .venv\Scripts\python voicelab_cli.py -q engines
+          .venv\Scripts\python tools\smoke_engine.py --engine chatterbox --style talk --out outputs\ci_smoke.wav
+
+      - name: 서버 + HTTP API 자체 점검(실제 생성 포함)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .venv\Scripts\python.exe -ArgumentList "app.py","--port","7860" -PassThru -RedirectStandardOutput server.log -RedirectStandardError server.err
+          for ($i = 0; $i -lt 120; $i++) {
+            try { Invoke-RestMethod http://127.0.0.1:7860/api/health | Out-Null; break } catch { Start-Sleep -Seconds 2 }
+          }
+          .venv\Scripts\python selftest.py --generate
+          $code = $LASTEXITCODE
+          Stop-Process -Id $p.Id -Force
+          exit $code
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-smoke-output
+          path: |
+            outputs/*.wav
+            server.log
+            server.err

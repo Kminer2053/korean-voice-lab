@@ -1,4 +1,10 @@
-"""iPhone 음성 메모(M4A)와 WAV를 macOS afconvert로 PCM WAV로 맞춘다."""
+"""참조 녹음을 16-bit 모노 PCM WAV 로 맞춘다. 맥·윈도우·리눅스 공통.
+
+변환 순서:
+1. WAV 는 표준 라이브러리 + numpy 로 직접 읽는다(8/16/24/32-bit, 여러 채널 → 모노).
+2. 그 밖의 형식(M4A·MP3·FLAC 등)은 PyAV(pip install av)로 디코딩한다. ffmpeg 를 따로 설치할 필요가 없다.
+3. PyAV 가 없으면 맥에서는 내장 afconvert 를 쓴다.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +19,9 @@ import numpy as np
 
 import local_env
 
+ALLOWED_SUFFIXES = {".wav", ".m4a", ".mp3", ".aiff", ".aif", ".caf", ".flac", ".ogg", ".webm"}
 AFCONVERT = "/usr/bin/afconvert"
-AFINFO = "/usr/bin/afinfo"
-ALLOWED_SUFFIXES = {".wav", ".m4a", ".mp3", ".aiff", ".aif", ".caf", ".flac"}
-# mlx-audio 음성 복제 안내의 권장 구간. 설치된 generate()가 이 길이로 자르지는 않는다.
+# 음성 복제 안내의 권장 구간. 생성 코드가 이 길이로 자르지는 않는다.
 GUIDE_MIN_SECONDS = 5.0
 GUIDE_MAX_SECONDS = 15.0
 NEAR_SILENCE_RMS = 0.008
@@ -64,129 +69,158 @@ def coerce_upload(file_obj: object) -> tuple[Path, str]:
     display_name = Path(original_name).name if original_name else path.name
     if suffix not in ALLOWED_SUFFIXES:
         raise UserInputError(
-            "WAV·M4A·MP3·AIFF·CAF·FLAC만 올릴 수 있습니다. "
-            f"지금 확장자는 '{suffix or '없음'}' 입니다. "
-            "iPhone 음성 메모는 보통 .m4a 입니다."
+            "WAV·M4A·MP3·FLAC·AIFF·CAF·OGG·WEBM만 올릴 수 있습니다. "
+            f"지금 확장자는 '{suffix or '없음'}' 입니다. 아이폰 음성 메모는 보통 .m4a 입니다."
         )
     return path, display_name
 
 
-def _afinfo_text(path: Path) -> str:
-    if not Path(AFINFO).is_file():
-        return ""
-    completed = subprocess.run(
-        [AFINFO, str(path)],
-        check=False,
-        capture_output=True,
-        text=True,
+# ---------------------------------------------------------------- 디코딩
+def _read_wav_numpy(path: Path) -> tuple[np.ndarray, int]:
+    """PCM WAV → float32 모노. 지원하지 않는 WAV(부동소수 등)는 wave.Error."""
+    with wave.open(str(path), "rb") as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        raw = handle.readframes(handle.getnframes())
+    if width == 1:
+        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 2:
+        data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 3:
+        bytes3 = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
+        ints = (bytes3[:, 0].astype(np.int32) | (bytes3[:, 1].astype(np.int32) << 8) | (bytes3[:, 2].astype(np.int32) << 16))
+        ints = np.where(ints >= 1 << 23, ints - (1 << 24), ints)
+        data = ints.astype(np.float32) / float(1 << 23)
+    elif width == 4:
+        data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / float(1 << 31)
+    else:
+        raise wave.Error(f"샘플 폭 {width}바이트 WAV는 읽지 못합니다.")
+    if channels > 1:
+        data = data.reshape(-1, channels).mean(axis=1)
+    return data, rate
+
+
+def _read_with_av(path: Path) -> tuple[np.ndarray, int]:
+    import av  # PyAV: ffmpeg 라이브러리를 품은 휠이라 따로 설치할 것이 없다.
+
+    with av.open(str(path)) as container:
+        stream = next((s for s in container.streams if s.type == "audio"), None)
+        if stream is None:
+            raise UserInputError("파일에 오디오 트랙이 없습니다.")
+        rate = int(stream.rate or stream.codec_context.sample_rate)
+        resampler = av.AudioResampler(format="flt", layout="mono", rate=rate)
+        chunks: list[np.ndarray] = []
+        for frame in container.decode(stream):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+        for out in resampler.resample(None):
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        raise UserInputError("디코딩한 오디오가 비어 있습니다.")
+    return np.concatenate(chunks).astype(np.float32), rate
+
+
+def _read_with_afconvert(path: Path, tmp_wav: Path) -> tuple[np.ndarray, int]:
+    done = subprocess.run(
+        [AFCONVERT, "-f", "WAVE", "-d", "LEI16", "-c", "1", str(path), str(tmp_wav)],
+        check=False, capture_output=True, text=True,
     )
-    if completed.returncode != 0:
-        return ""
-    return completed.stdout
+    if done.returncode != 0 or not tmp_wav.is_file():
+        detail = (done.stderr or done.stdout or "").strip()
+        raise UserInputError(f"macOS afconvert 변환에 실패했습니다.\n{detail}")
+    try:
+        return _read_wav_numpy(tmp_wav)
+    finally:
+        tmp_wav.unlink(missing_ok=True)
 
 
-def _parse_afinfo(text: str) -> tuple[float | None, int | None]:
-    duration = None
-    sample_rate = None
-    duration_match = re.search(r"duration:\s*([0-9.]+)\s*sec", text, re.IGNORECASE)
-    if duration_match:
-        duration = float(duration_match.group(1))
-    rate_match = re.search(r"(\d+)\s*Hz", text)
-    if rate_match:
-        sample_rate = int(rate_match.group(1))
-    return duration, sample_rate
+def decode_audio(path: Path) -> tuple[np.ndarray, int, str]:
+    """(float32 모노, 샘플레이트, 사용한 방법)."""
+    errors: list[str] = []
+    if path.suffix.lower() == ".wav":
+        try:
+            data, rate = _read_wav_numpy(path)
+            return data, rate, "wav"
+        except (wave.Error, EOFError, ValueError) as exc:
+            errors.append(f"WAV 직접 읽기: {exc}")
+    try:
+        data, rate = _read_with_av(path)
+        return data, rate, "pyav"
+    except ImportError:
+        errors.append("PyAV 없음(pip install av)")
+    except UserInputError:
+        raise
+    except Exception as exc:
+        errors.append(f"PyAV: {exc}")
+    if Path(AFCONVERT).is_file():
+        data, rate = _read_with_afconvert(path, path.with_name(path.stem + ".afconvert.wav"))
+        return data, rate, "afconvert"
+    raise UserInputError(
+        "이 파일을 읽지 못했습니다. WAV로 저장해 올리거나 PyAV를 설치하세요(.venv 의 pip install av).\n"
+        + "\n".join(errors)
+    )
+
+
+def write_pcm16(path: Path, data: np.ndarray, rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pcm = (np.clip(np.nan_to_num(data), -1.0, 1.0) * 32767.0).astype("<i2")
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(int(rate))
+        handle.writeframes(pcm.tobytes())
 
 
 def convert_to_pcm_wav(source: Path, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        dest.unlink()
-    completed = subprocess.run(
-        [AFCONVERT, "-f", "WAVE", "-d", "LEI16", "-c", "1", str(source), str(dest)],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0 or not dest.is_file():
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise UserInputError(
-            "macOS afconvert로 PCM WAV 변환에 실패했습니다. ffmpeg는 설치하지 않습니다.\n"
-            f"{detail or 'afconvert가 오류 문구를 남기지 않았습니다.'}"
-        )
+    data, rate, _method = decode_audio(source)
+    if data.size == 0:
+        raise UserInputError("변환된 음성에 샘플이 없습니다.")
+    write_pcm16(dest, data, rate)
 
 
 def _wav_stats(path: Path) -> tuple[float, int, float]:
     try:
-        with wave.open(str(path), "rb") as handle:
-            channels = handle.getnchannels()
-            sample_rate = handle.getframerate()
-            width = handle.getsampwidth()
-            frames = handle.getnframes()
-            if channels != 1 or width != 2 or sample_rate <= 0:
-                raise UserInputError(
-                    "변환된 WAV가 16-bit 모노 PCM이 아닙니다. "
-                    f"채널 {channels}, 샘플 폭 {width}, 샘플레이트 {sample_rate}."
-                )
-            raw = handle.readframes(frames)
-    except UserInputError:
-        raise
-    except wave.Error as exc:
+        data, rate = _read_wav_numpy(path)
+    except (wave.Error, EOFError) as exc:
         raise UserInputError(f"WAV를 열지 못했습니다: {exc}") from exc
-    if frames <= 0 or not raw:
-        raise UserInputError("변환된 음성에 샘플이 없습니다.")
-    samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    duration = frames / float(sample_rate)
-    rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
-    return duration, sample_rate, rms
+    if data.size == 0 or rate <= 0:
+        raise UserInputError("음성에 샘플이 없습니다.")
+    rms = float(np.sqrt(np.mean(np.square(data))))
+    return data.size / float(rate), rate, rms
 
 
 def _guidance(duration: float, rms: float) -> str:
     notes: list[str] = [f"실제 길이: {duration:.2f}초"]
     if rms < NEAR_SILENCE_RMS:
-        notes.append(
-            f"경고: 무음에 가깝습니다 (RMS {rms:.4f}). "
-            "이 녹음은 완료로 치지 않습니다. 다시 녹음하기 전에는 만들지 않습니다."
-        )
+        notes.append(f"경고: 무음에 가깝습니다 (RMS {rms:.4f}). 다시 녹음하기 전에는 등록하지 않습니다.")
     elif duration < GUIDE_MIN_SECONDS or duration > GUIDE_MAX_SECONDS:
-        notes.append(
-            "mlx-audio 음성 복제 안내는 깨끗한 말 5–15초를 권합니다. "
-            "너무 짧으면 화자 정보가 부족할 수 있고, 너무 길면 모델을 혼란시킬 수 있다고 적혀 있습니다. "
-            "설치된 generate()는 이 파일을 잘라 내지 않습니다. 유사도나 MOS는 재지 않았습니다."
-        )
+        notes.append("깨끗한 말 5–15초를 권합니다. 너무 짧으면 화자 정보가 부족하고, 너무 길면 모델이 흔들릴 수 있습니다.")
     else:
-        notes.append(
-            "길이는 안내의 5–15초 안에 있습니다. 무음 경고는 없습니다. "
-            "음질이 좋아졌다는 측정은 아닙니다."
-        )
-    notes.append("참조 대본에는 읽은 문장만 넣습니다. 억양 지시문은 넣지 않습니다.")
+        notes.append("길이는 권장 범위(5–15초) 안에 있습니다.")
     return "\n".join(notes)
 
 
 def prepare_upload(file_obj: object) -> PreparedAudio:
     source, display_name = coerce_upload(file_obj)
-    info = _afinfo_text(source)
-    source_duration, source_rate = _parse_afinfo(info)
+    data, source_rate, method = decode_audio(source)
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(display_name).stem).strip("-") or "reference"
     dest = local_env.REFERENCES / f"{stamp}-{stem}.wav"
-    convert_to_pcm_wav(source, dest)
+    if data.size == 0:
+        raise UserInputError("변환된 음성에 샘플이 없습니다.")
+    write_pcm16(dest, data, source_rate)
     duration, wav_rate, rms = _wav_stats(dest)
-    shown_duration = source_duration if source_duration is not None else duration
     summary = (
-        f"{_guidance(shown_duration, rms)}\n"
-        f"길이: {shown_duration:.2f}초"
-        + (f" (변환 WAV {duration:.2f}초)" if source_duration is not None else "")
-        + "\n"
-        f"샘플레이트: 원본 {source_rate if source_rate is not None else 'afinfo에서 확인 못 함'} Hz, "
-        f"변환 WAV {wav_rate} Hz\n"
-        f"RMS: {rms:.4f}\n"
+        f"{_guidance(duration, rms)}\n"
+        f"샘플레이트: {wav_rate} Hz · RMS {rms:.4f} · 변환 방법 {method}\n"
         f"파일: {display_name}\n"
         f"저장 위치: {dest.resolve()}"
     )
     return PreparedAudio(
         wav_path=dest.resolve(),
         source_name=display_name,
-        duration_sec=shown_duration,
+        duration_sec=duration,
         source_sample_rate=source_rate,
         wav_sample_rate=wav_rate,
         rms=rms,
@@ -199,3 +233,4 @@ def reference_kind(path: Path) -> str:
     if "system-fixture" in name or "say-yuna" in name:
         return "system-say-fixture"
     return "user-upload"
+

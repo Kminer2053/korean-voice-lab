@@ -87,7 +87,8 @@ class Style:
     @property
     def ready(self) -> bool:
         path = self.path
-        return path is not None and usable_reference(path) and bool(self.script.strip())
+        # 대본은 엔진에 따라 필요하다(Qwen3 필요, Chatterbox 불필요). 녹음만 있으면 준비된 것으로 본다.
+        return path is not None and usable_reference(path)
 
     def duration_sec(self) -> float | None:
         path = self.path
@@ -207,9 +208,7 @@ def register(
     style_id = LEGACY_ALIASES.get(style_id, style_id)
     if not STYLE_ID_PATTERN.match(style_id):
         raise UserInputError("말투 ID는 영문 소문자·숫자·-·_ 로 1–32자여야 합니다. 예: narration2")
-    cleaned = (script or "").strip()
-    if not cleaned:
-        raise UserInputError("녹음에서 실제로 읽은 문장(대본)을 적으세요. 비어 있으면 등록하지 않습니다.")
+    cleaned = (script or "").strip()  # 비워도 등록은 된다. 대본이 필요한 엔진(Qwen3)은 생성 때 알려 준다.
     path = Path(wav_path)
     if not usable_reference(path):
         raise UserInputError("참조 녹음이 없거나 무음에 가깝습니다. 다시 녹음하거나 다른 파일을 올리세요.")
