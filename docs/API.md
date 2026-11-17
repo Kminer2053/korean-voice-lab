@@ -107,7 +107,7 @@
   "path": "/abs/path/대화_20261117T160815877112.wav", "file": "대화_20261117T160815877112.wav",
   "url": "/api/files/대화_20261117T160815877112.wav",
   "style": "talk", "style_label": "대화",
-  "text": "원문", "spoken_text": "발음 사전 적용 뒤 실제로 읽힌 문장",
+  "text": "원문", "spoken_text": "발음 사전(과 Chatterbox면 숫자 읽기) 적용 뒤 실제로 읽힌 문장",
   "duration_sec": 3.04, "sample_rate": 24000, "generate_sec": 1.6, "load_sec": 0.0,
   "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit", "engine": "qwen3-mlx", "device": "mlx-metal",
   "seed": null, "cached": false

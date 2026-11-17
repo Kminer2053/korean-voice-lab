@@ -37,6 +37,7 @@ class ChatterboxTorch(Backend):
         commercial_use=True,
         platforms=("windows", "linux", "mac-arm64"),
         needs_ref_text=False,
+        reads_digits=False,  # 숫자를 엉뚱하게 읽어(벤치마크 CER 0.4) 한국어 소리로 바꿔 넘긴다
         approx_download_gb=3.2,
         homepage="https://github.com/resemble-ai/chatterbox",
         notes="23개 언어 제로샷 복제. NVIDIA GPU(CUDA)에서 빠르고 CPU에서도 돈다. 출력에 Perth 워터마크가 들어간다.",

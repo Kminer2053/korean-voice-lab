@@ -51,15 +51,39 @@ PyTorch 엔진 패키지들은 서로 다른 버전을 고정합니다.
 | 엔진 | 상태 |
 |---|---|
 | `qwen3-mlx` | 맥(M5, 16GB)에서 화면·API·명령줄·MCP·예전 `/synthesize` 호출까지 실제 생성 확인 |
-| `chatterbox-mlx` | 코드 연결 완료. 가중치(2.7GB) 내려받기와 한국어 생성·비교는 남음 |
+| `chatterbox-mlx` | 맥(M5, 16GB)에서 한국어 생성·비교 확인(아래 표). 첫 실행 때 가중치 약 2.7GB를 받습니다 |
 | `chatterbox-torch` | 코드 연결 완료. Windows CPU 실검증은 GitHub Actions `windows-smoke`로 진행 |
 | `qwen3-torch` | 코드 연결 완료. NVIDIA GPU 환경 검증 필요 |
 
-비교는 `tools/benchmark.py`(생성·속도)와 `tools/evaluate.py`(받아쓰기 오독률 CER, ECAPA 화자 유사도)로 합니다. 결과는 이 문서에 덧붙입니다.
+### 맥 비교 결과(2026-11-17, M5 16GB)
+
+같은 사람의 참조 녹음 2개(대화·안내 말투) × 한국어 문장 10개(인사·안내·질문·감탄·외래어·숫자·긴 문장), seed 1.
+
+| 엔진 | 받아쓰기 오독률(CER) | 화자 유사도(SIM) | 속도(RTF) | 모델 적재 |
+|---|---|---|---|---|
+| `qwen3-mlx` | 0.0% | 0.759 | 0.47 | 2.5초 |
+| `chatterbox-mlx` | 1.0% | 0.745 | 0.95 | 1.3초 |
+
+- **기준선**: 같은 사람의 서로 다른 참조 녹음끼리 SIM이 0.753입니다. 두 엔진 모두 이 수준이라, 화자 유사도로는 원래 목소리와 구별이 어렵습니다.
+- **오독**: Chatterbox는 "할 일"을 "할의"처럼 붙여 읽는 경우가 20문장 중 3번 있었습니다. Qwen3는 오독이 없었습니다.
+- **숫자**: Chatterbox는 아라비아 숫자를 엉뚱하게 읽습니다(숫자 문장 CER 0.39~0.46). 그래서 Chatterbox 엔진에는 숫자를 한국어 소리로 바꿔 넘깁니다(`textnorm.py`: `2026년` → `이천이십육년`, `9시` → `아홉 시`, `12%` → `십이 퍼센트`). 바꾼 뒤에는 숫자 문장도 오독이 없습니다. 실제로 읽은 문장은 응답의 `spoken_text`에서 볼 수 있습니다.
+- **속도**: RTF는 생성 시간 ÷ 음성 길이입니다. Qwen3는 실시간의 약 2배, Chatterbox는 실시간 정도입니다.
+- **정리**: 맥에서는 Qwen3-MLX가 정확도·속도 모두 조금 낫습니다. 개발 주체 국가를 따지는 기관이라면 Chatterbox-MLX도 품질 차이가 작아 실사용에 충분합니다.
+
+CER은 faster-whisper large-v3로 받아 적어, 띄어쓰기·문장부호를 빼고 숫자는 양쪽 모두 같은 규칙으로 한글로 바꾼 뒤 글자 단위로 비교했습니다. SIM은 어느 엔진과도 무관한 SpeechBrain ECAPA 화자 임베딩의 코사인 유사도입니다.
+
+다시 재려면:
+
+```bash
+.venv/bin/python tools/benchmark.py --engines qwen3-mlx,chatterbox-mlx --styles talk,guide -o outputs/bench
+python3.12 -m venv .venv-eval && .venv-eval/bin/pip install faster-whisper speechbrain torch torchaudio soundfile
+.venv-eval/bin/python tools/evaluate.py outputs/bench   # → outputs/bench/report.md
+```
 
 ## 새 엔진 붙이기
 
 1. `backends/<이름>.py`에 `Backend`를 상속한 클래스를 만듭니다. `info`, `check`, `load`, `generate`를 채웁니다. 모듈을 import할 때 무거운 패키지를 불러오지 않습니다.
 2. `backends/__init__.py`의 `REGISTRY`에 `"<계열>-<실행 방식>": "backends.<모듈>:<클래스>"`를 더합니다. 같은 계열 안에서는 빠른 실행 방식을 위에 둡니다.
 3. 의존성이 겹치면 `requirements/engine-<계열>.txt`를 만들어 `.venv-<계열>`에 설치합니다.
-4. `tools/smoke_engine.py --engine <id>`와 `tools/benchmark.py`로 확인합니다.
+4. 숫자를 잘못 읽는 모델이면 `BackendInfo(reads_digits=False)`로 둡니다. 숫자를 한국어 소리로 바꿔 넘깁니다.
+5. `tools/smoke_engine.py --engine <id>`와 `tools/benchmark.py`로 확인합니다.

@@ -135,8 +135,9 @@ def _read_with_afconvert(path: Path, tmp_wav: Path) -> tuple[np.ndarray, int]:
         tmp_wav.unlink(missing_ok=True)
 
 
-def decode_audio(path: Path) -> tuple[np.ndarray, int, str]:
+def decode_audio(path: Path | str) -> tuple[np.ndarray, int, str]:
     """(float32 모노, 샘플레이트, 사용한 방법)."""
+    path = Path(path)
     errors: list[str] = []
     if path.suffix.lower() == ".wav":
         try:

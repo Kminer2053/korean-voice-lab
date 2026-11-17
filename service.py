@@ -19,6 +19,7 @@ import audio_prep
 import engine
 import records
 import backends
+from textnorm import spell_numbers
 import voices
 from audio_prep import UserInputError
 
@@ -173,6 +174,8 @@ def synthesize(
         )
     # use_lexicon=False 이고 replace 도 없으면 문장을 손대지 않고 그대로 읽는다(예전 /synthesize 동작).
     spoken = apply_lexicon(raw, replace, use_file=use_lexicon) if (use_lexicon or replace) else raw
+    if not backends.info(engine_id).reads_digits:
+        spoken = spell_numbers(spoken)  # 숫자를 잘못 읽는 엔진은 한국어 소리로 바꿔 넘긴다(engine 에서도 같은 처리)
     target = Path(output_path).expanduser().resolve() if output_path else None
 
     def phase(name: str) -> None:
@@ -303,15 +306,18 @@ def safe_name(value: str) -> str:
 
 
 def _item_digest(item: BatchItem, style: voices.Style, engine_id: str) -> str:
+    fields = {
+        "text": apply_lexicon(item.text, item.replace),
+        "style": style.id,
+        "file": style.file,
+        "script": style.script,
+        "seed": item.seed,
+        "engine": engine_id,
+    }
+    if not backends.info(engine_id).reads_digits:
+        fields["text"] = spell_numbers(fields["text"])  # 숫자 읽기 규칙이 바뀌면 다시 만든다
     key = json.dumps(
-        {
-            "text": apply_lexicon(item.text, item.replace),
-            "style": style.id,
-            "file": style.file,
-            "script": style.script,
-            "seed": item.seed,
-            "engine": engine_id,
-        },
+        fields,
         ensure_ascii=False,
         sort_keys=True,
     )

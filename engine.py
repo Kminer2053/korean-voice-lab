@@ -18,6 +18,7 @@ import numpy as np
 
 import local_env
 import backends
+from textnorm import spell_numbers
 import system_probe
 from backends import Backend, BackendUnavailable
 
@@ -188,6 +189,8 @@ def synthesize(
         if not cleaned_text:
             raise RuntimeError("생성할 문장이 비어 있습니다.")
         info = backends.info(engine_id)
+        if not info.reads_digits:
+            cleaned_text = spell_numbers(cleaned_text)
         cleaned_ref = ref_text.strip()
         if info.needs_ref_text and not cleaned_ref:
             raise RuntimeError("이 엔진은 참조 녹음의 대본이 필요합니다. 대본이 비어 있습니다.")

@@ -32,6 +32,7 @@ class BackendInfo:
     homepage: str
     notes: str = ""
     languages: tuple[str, ...] = ("ko",)
+    reads_digits: bool = True  # False 면 숫자를 한국어 소리로 바꿔 넘긴다(textnorm.spell_numbers)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

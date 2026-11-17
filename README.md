@@ -24,6 +24,13 @@ TTS 모델을 골라 쓸 수 있고, 모델마다 그 컴퓨터에서 가장 빠
 
 API·명령줄·MCP에서 `engine`에 `qwen3` 또는 `chatterbox`만 적으면 실행 방식은 자동으로 골라집니다. 자세한 내용은 [docs/ENGINES.md](docs/ENGINES.md)에 있습니다.
 
+맥(M5 16GB)에서 같은 목소리·같은 문장 20개로 비교한 결과입니다. 측정 방법은 [docs/ENGINES.md](docs/ENGINES.md#맥-비교-결과2026-11-17-m5-16gb)에 있습니다.
+
+| 엔진 | 받아쓰기 오독률 | 화자 유사도 (같은 사람 녹음끼리 0.753) | 생성 시간 ÷ 음성 길이 |
+|---|---|---|---|
+| `qwen3-mlx` | 0.0% | 0.759 | 0.47 |
+| `chatterbox-mlx` | 1.0% | 0.745 | 0.95 |
+
 ## 요구 사항
 
 | | 맥 | 윈도우 |
@@ -137,6 +144,7 @@ engine.py           엔진 실행기: 엔진 하나만 메모리에, 생성은 �
 backends/           엔진 구현(qwen3_mlx, qwen3_torch, chatterbox_mlx, chatterbox_torch)과 작업 프로세스
 voices.py           말투 레지스트리 (references/voices.json)
 audio_prep.py       녹음 변환(WAV 직접, 그 밖은 PyAV, 맥은 afconvert 대체)·무음 검사
+textnorm.py         숫자를 한국어 소리로(숫자를 잘못 읽는 엔진용, 채점에도 사용)
 voicelab_cli.py     명령줄
 mcp_server.py       MCP 서버(stdio)
 selftest.py         서버 점검

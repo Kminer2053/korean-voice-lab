@@ -28,6 +28,7 @@ class ChatterboxMLX(Backend):
         commercial_use=True,
         platforms=("mac-arm64",),
         needs_ref_text=False,
+        reads_digits=False,  # 숫자를 엉뚱하게 읽어(벤치마크 CER 0.4) 한국어 소리로 바꿔 넘긴다
         approx_download_gb=2.7,
         homepage="https://github.com/resemble-ai/chatterbox",
         notes="23개 언어 제로샷 복제. 참조 녹음만 쓰고 대본은 쓰지 않는다. 출력에 Perth 워터마크가 없는 MLX 변환본.",

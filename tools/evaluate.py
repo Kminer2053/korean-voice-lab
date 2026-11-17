@@ -7,7 +7,7 @@
   .venv-eval/bin/python tools/evaluate.py outputs/bench
 
 - CER: faster-whisper(large-v3, CPU int8)로 받아 적어 원문과 글자 단위 편집 거리를 잰다.
-  띄어쓰기·문장부호는 빼고 비교한다. 숫자 문장은 받아쓰기 표기 차이로 높게 나올 수 있다.
+  띄어쓰기·문장부호는 빼고, 숫자는 양쪽 모두 textnorm 규칙으로 한글 소리로 바꿔 비교한다.
 - SIM: SpeechBrain ECAPA(spkrec-ecapa-voxceleb) 임베딩 코사인 유사도(참조 녹음 대 생성 음성).
   어느 엔진의 내부 인코더도 아닌 독립 모델이다. 1에 가까울수록 참조 목소리와 비슷하다.
 결과: <bench>/eval.json, <bench>/report.md
@@ -17,14 +17,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+# 채점 모델도 저장소 안 캐시(.cache/, 커밋 안 됨)에 받는다
+os.environ.setdefault("HF_HOME", str(ROOT / ".cache" / "huggingface"))
+
 
 def normalize(text: str) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]", "", text).lower()
+    # 숫자 표기 차이(9시 ↔ 아홉 시)가 오독으로 잡히지 않게 양쪽 모두 같은 규칙으로 한글 소리로 바꾼 뒤 비교한다
+    from textnorm import spell_numbers
+
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", spell_numbers(text)).lower()
 
 
 def edit_distance(a: str, b: str) -> int:
@@ -42,6 +51,20 @@ def cer(ref: str, hyp: str) -> float:
     return edit_distance(r, h) / max(len(r), 1)
 
 
+def load_16k(path: str):
+    """WAV 를 16kHz 모노 float32 numpy 로(faster-whisper·ECAPA 공용, PyAV·torchcodec 버전과 무관)."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    import torchaudio
+
+    data, rate = sf.read(path, dtype="float32", always_2d=True)
+    mono = torch.from_numpy(np.ascontiguousarray(data.mean(axis=1)))
+    if rate != 16000:
+        mono = torchaudio.functional.resample(mono, rate, 16000)
+    return mono.numpy()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bench", help="benchmark.py 결과 폴더")
@@ -55,28 +78,37 @@ def main() -> int:
 
     stt = WhisperModel(args.whisper, device="cpu", compute_type="int8")
     for row in rows:
-        segments, _info = stt.transcribe(row["path"], language="ko", beam_size=5, vad_filter=False)
+        segments, _info = stt.transcribe(load_16k(row["path"]), language="ko", beam_size=5, vad_filter=False)
         row["hyp"] = "".join(segment.text for segment in segments).strip()
         row["cer"] = cer(row["text"], row["hyp"])
         print(f"[CER] {row['engine']} {row['style']} {row['index']:02d}: {row['cer']:.3f} | {row['hyp']}", file=sys.stderr)
 
+    ref_pairs: list[float] = []
     if not args.no_sim:
         import torch
-        import torchaudio
         from speechbrain.inference.speaker import EncoderClassifier
 
-        enc = EncoderClassifier.from_hparams("speechbrain/spkrec-ecapa-voxceleb", run_opts={"device": "cpu"})
+        enc = EncoderClassifier.from_hparams(
+            "speechbrain/spkrec-ecapa-voxceleb",
+            savedir=str(ROOT / ".cache" / "speechbrain" / "spkrec-ecapa-voxceleb"),
+            run_opts={"device": "cpu"},
+        )
         cache: dict[str, torch.Tensor] = {}
 
         def embed(path: str) -> torch.Tensor:
             if path not in cache:
-                wav, sr = torchaudio.load(path)
-                wav = torchaudio.functional.resample(wav.mean(0, keepdim=True), sr, 16000)
+                wav = torch.from_numpy(load_16k(path)).unsqueeze(0)
                 cache[path] = enc.encode_batch(wav).squeeze()
             return cache[path]
 
+        def sim(a: str, b: str) -> float:
+            return float(torch.nn.functional.cosine_similarity(embed(a), embed(b), dim=0))
+
         for row in rows:
-            row["sim"] = float(torch.nn.functional.cosine_similarity(embed(row["ref"]), embed(row["path"]), dim=0))
+            row["sim"] = sim(row["ref"], row["path"])
+        # 기준선: 같은 사람의 서로 다른 참조 녹음끼리 유사도(엔진이 넘기기 어려운 상한에 가깝다)
+        refs = sorted({r["ref"] for r in rows})
+        ref_pairs += [sim(a, b) for i, a in enumerate(refs) for b in refs[i + 1:]]
 
     (folder / "eval.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
     groups: dict[str, list[dict]] = {}
@@ -100,6 +132,18 @@ def main() -> int:
             f"{(statistics.mean(sims) if sims else float('nan')):.3f} | {statistics.mean(rtfs):.2f} | "
             f"{max(r['load_sec'] for r in items):.1f} |"
         )
+    if ref_pairs:
+        lines += ["", f"기준선: 같은 사람의 서로 다른 참조 녹음끼리 SIM {statistics.mean(ref_pairs):.3f}"
+                  f"({len(ref_pairs)}쌍). 생성 음성의 SIM이 이 값에 가까울수록 원래 목소리와 구별하기 어렵습니다."]
+    lines += ["", "## 말투별", "", "| 엔진 | 말투 | CER 평균 | SIM 평균 | RTF 평균 |", "|---|---|---|---|---|"]
+    for engine_id, items in groups.items():
+        for style in sorted({r["style"] for r in items}):
+            sub = [r for r in items if r["style"] == style]
+            sims = [r["sim"] for r in sub if "sim" in r]
+            lines.append(
+                f"| `{engine_id}` | {style} | {statistics.mean(r['cer'] for r in sub):.3f} | "
+                f"{(statistics.mean(sims) if sims else float('nan')):.3f} | {statistics.mean(r['rtf'] for r in sub):.2f} |"
+            )
     lines += ["", "## 문장별", "", "| 엔진 | 말투 | # | CER | SIM | 받아쓰기 |", "|---|---|---|---|---|---|"]
     for row in rows:
         lines.append(
@@ -107,7 +151,7 @@ def main() -> int:
             f"{row.get('sim', float('nan')):.3f} | {row['hyp']} |"
         )
     (folder / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print("\n".join(lines[:6 + len(groups)]))
+    print("\n".join(lines))
     return 0
 
 
