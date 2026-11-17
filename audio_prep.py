@@ -235,3 +235,24 @@ def reference_kind(path: Path) -> str:
         return "system-say-fixture"
     return "user-upload"
 
+
+def ensure_tail_silence(audio: np.ndarray, rate: int, min_sec: float) -> np.ndarray:
+    """끝 무음이 min_sec 보다 짧으면 무음을 덧붙인다(이미 충분하면 그대로).
+
+    Qwen3 는 마지막 음절 직후 바로 끝나(끝 무음 0.01~0.07초) 브라우저·블루투스 재생에서 끝이 먹혀
+    서둘러 끊긴 것처럼 들린다. 소리 자체는 온전하므로 자르지 않고 쉼만 더한다.
+    """
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if min_sec <= 0 or audio.size == 0:
+        return audio
+    rms = float(np.sqrt(np.mean(audio**2)))
+    voiced = np.flatnonzero(np.abs(audio) > max(rms * 0.1, 1e-3))
+    tail_sec = (audio.size - 1 - voiced[-1]) / rate if voiced.size else audio.size / rate
+    if tail_sec >= min_sec:
+        return audio
+    if abs(float(audio[-1])) > 0.01:  # 끝 샘플이 0이 아니면 5ms 페이드로 '틱' 소리를 막는다
+        n = min(audio.size, max(1, int(rate * 0.005)))
+        audio = audio.copy()
+        audio[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
+    return np.concatenate([audio, np.zeros(int(round((min_sec - tail_sec) * rate)), dtype=np.float32)])
+

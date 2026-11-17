@@ -45,7 +45,7 @@ Intel Mac은 MLX를 지원하지 않습니다. 윈도우와 같은 PyTorch 방�
 
 ### 맥
 
-1. 저장소를 내려받습니다(`git clone` 또는 ZIP).
+1. 저장소를 내려받습니다. `git clone https://github.com/Kminer2053/korean-voice-lab.git` 또는 GitHub의 **Code → Download ZIP**.
 2. **`setup.command`**를 더블클릭합니다. 이 폴더의 `.venv`에만 설치합니다.
 3. **`start.command`**를 더블클릭하면 브라우저에 `http://127.0.0.1:7860`이 열립니다.
 
@@ -79,6 +79,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements/server.txt
 python3.12 -m venv .venv-chatterbox
 .venv-chatterbox/bin/pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124   # GPU 없으면 /whl/cpu
 .venv-chatterbox/bin/pip install -r requirements/engine-chatterbox.txt
+.venv-chatterbox/bin/pip install --no-deps -r requirements/engine-chatterbox-src.txt   # 다국어 v3 를 읽는 GitHub 판(git 불필요)
 .venv/bin/python app.py
 ```
 

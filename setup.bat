@@ -40,7 +40,7 @@ where nvidia-smi >nul 2>&1 && (
 echo PyTorch: %TORCH_KIND%
 
 rem ---- 3. Chatterbox 엔진(.venv-chatterbox) - 미국 Resemble AI, MIT
-call :engine chatterbox requirements\engine-chatterbox.txt || goto :fail
+call :engine chatterbox requirements\engine-chatterbox.txt requirements\engine-chatterbox-src.txt || goto :fail
 
 rem ---- 4. Qwen3 엔진(.venv-qwen3) - 선택
 rem 자동 설치(CI 등)에서는 VOICELAB_WITH_QWEN=y 또는 n 으로 묻지 않고 정한다.
@@ -61,7 +61,7 @@ if not defined CI if not defined VOICELAB_WITH_QWEN pause
 exit /b 0
 
 :engine
-rem %1 = 모델 계열, %2 = requirements 파일
+rem %1 = 모델 계열, %2 = requirements 파일, %3 = (선택) 의존성 없이 설치할 본체 파일
 set "EV=.venv-%~1"
 echo.
 echo === %~1 엔진 가상환경: %EV%
@@ -71,6 +71,9 @@ if not exist "%EV%\Scripts\python.exe" (
 "%EV%\Scripts\python.exe" -m pip install --upgrade pip || exit /b 1
 "%EV%\Scripts\python.exe" -m pip install torch==2.6.0 torchaudio==2.6.0 --index-url %TORCH_INDEX% || exit /b 1
 "%EV%\Scripts\python.exe" -m pip install -r "%~2" || exit /b 1
+if not "%~3"=="" (
+  "%EV%\Scripts\python.exe" -m pip install --no-deps -r "%~3" || exit /b 1
+)
 exit /b 0
 
 :fail

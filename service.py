@@ -314,6 +314,8 @@ def _item_digest(item: BatchItem, style: voices.Style, engine_id: str) -> str:
         "seed": item.seed,
         "engine": engine_id,
     }
+    if engine.TAIL_SILENCE_SEC:
+        fields["tail"] = engine.TAIL_SILENCE_SEC  # 끝 쉼 보정 전에 만든 파일은 다시 만든다
     if not backends.info(engine_id).reads_digits:
         fields["text"] = spell_numbers(fields["text"])  # 숫자 읽기 규칙이 바뀌면 다시 만든다
     key = json.dumps(

@@ -1,0 +1,5 @@
+# chatterbox-tts 본체: GitHub resemble-ai/chatterbox 커밋 ab55923(2026-11-04)을 ZIP 으로 받는다(git 불필요).
+# 의존성은 engine-chatterbox.txt 로 먼저 깔고, 이 파일은 --no-deps 로 설치한다.
+#   pip install -r requirements/engine-chatterbox.txt
+#   pip install --no-deps -r requirements/engine-chatterbox-src.txt
+chatterbox-tts @ https://github.com/resemble-ai/chatterbox/archive/ab55923c27757c90cfcc407baa57dc25a7d25217.zip

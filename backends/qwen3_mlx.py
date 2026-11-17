@@ -40,7 +40,7 @@ class Qwen3MLX(Backend):
         if current_platform() != "mac-arm64":
             return False, "Apple Silicon Mac에서만 돕니다."
         if not (has_module("mlx") and has_module("mlx_audio")):
-            return False, "mlx·mlx-audio 패키지가 없습니다(requirements-mac.txt)."
+            return False, "mlx·mlx-audio 패키지가 없습니다(requirements/mac-mlx.txt)."
         return True, "사용 가능"
 
     def device(self) -> str:
@@ -99,6 +99,11 @@ class Qwen3MLX(Backend):
         if not finals:
             raise RuntimeError("모델이 오디오를 반환하지 않았습니다.")
         pieces = [np.asarray(item.audio, dtype=np.float32).reshape(-1) for item in finals]
+        if len(pieces) > 1:  # 줄마다 따로 만든 조각 사이에 쉼을 둔다(끝은 engine 이 맞춘다)
+            from audio_prep import ensure_tail_silence
+
+            rate = int(finals[-1].sample_rate)
+            pieces = [ensure_tail_silence(p, rate, 0.3) for p in pieces[:-1]] + pieces[-1:]
         stats = {"peak_memory_bytes": int(mx.get_peak_memory())}
         mx.clear_cache()
         return GenerationOutput(np.concatenate(pieces), int(finals[-1].sample_rate), stats)

@@ -35,7 +35,7 @@ class Qwen3Torch(Backend):
 
     def check(self) -> tuple[bool, str]:
         if not (has_module("torch") and has_module("qwen_tts")):
-            return False, "torch·qwen-tts 패키지가 없습니다(requirements-qwen-torch.txt)."
+            return False, "torch·qwen-tts 패키지가 없습니다(requirements/engine-qwen3.txt)."
         return True, "사용 가능"
 
     def device(self) -> str:

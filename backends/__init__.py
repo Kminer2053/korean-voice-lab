@@ -101,10 +101,12 @@ def engine_python(engine_id: str) -> Path | None:
     meta = info(engine_id)
     if meta.runtime != "torch":
         return None
-    here = Path(sys.executable).resolve()
+    # 지금 도는 가상환경이면 건너뛴다. 맥·리눅스의 venv python 은 같은 기본 파이썬으로 가는 링크라
+    # 실행 파일 경로(resolve)가 아니라 가상환경 폴더(sys.prefix)로 비교해야 한다.
+    here = Path(sys.prefix).resolve()
     for folder in (ROOT / f".venv-{meta.family}", ROOT / ".venv-torch"):
         candidate = _venv_python(folder)
-        if candidate.exists() and candidate.resolve() != here:
+        if candidate.exists() and folder.resolve() != here:
             return candidate
     return None
 

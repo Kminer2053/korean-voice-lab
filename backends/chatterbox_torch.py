@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gc
+import inspect
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -46,14 +48,15 @@ class ChatterboxTorch(Backend):
     def __init__(self) -> None:
         self._model = None
         self._device = "cpu"
+        self._variant = ""
 
     def check(self) -> tuple[bool, str]:
         if not (has_module("torch") and has_module("chatterbox")):
-            return False, "torch·chatterbox-tts 패키지가 없습니다(requirements-torch.txt)."
+            return False, "torch·chatterbox-tts 패키지가 없습니다(requirements/engine-chatterbox.txt, engine-chatterbox-src.txt)."
         return True, "사용 가능"
 
     def device(self) -> str:
-        return self._device
+        return self._device + self._variant
 
     def load(self) -> None:
         ok, reason = self.check()
@@ -62,7 +65,16 @@ class ChatterboxTorch(Backend):
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
         self._device = pick_torch_device()
-        self._model = ChatterboxMultilingualTTS.from_pretrained(device=self._device, t3_model="v3")
+        # v3 가중치는 GitHub 판 chatterbox-tts(engine-chatterbox-src.txt)에서만 고를 수 있다.
+        # PyPI 0.1.7 이 깔려 있으면 v2 로 돌리고 그 사실을 장치 이름에 남긴다.
+        if "t3_model" in inspect.signature(ChatterboxMultilingualTTS.from_pretrained).parameters:
+            self._model = ChatterboxMultilingualTTS.from_pretrained(device=self._device, t3_model="v3")
+            self._variant = ""
+        else:
+            print("chatterbox-tts 가 다국어 v3 를 지원하지 않는 판이라 v2 로 돌립니다. "
+                  "requirements/engine-chatterbox-src.txt 를 설치하면 v3 를 씁니다.", file=sys.stderr)
+            self._model = ChatterboxMultilingualTTS.from_pretrained(device=self._device)
+            self._variant = " (v2)"
 
     def unload(self) -> None:
         self._model = None

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -18,6 +19,7 @@ import numpy as np
 
 import local_env
 import backends
+from audio_prep import ensure_tail_silence
 from textnorm import spell_numbers
 import system_probe
 from backends import Backend, BackendUnavailable
@@ -26,6 +28,11 @@ _LOCK = threading.Lock()
 _ACTIVE: Backend | None = None
 _ACTIVE_ID: str | None = None
 
+
+
+# 결과 끝에 남길 최소 무음(초). 끝 쉼이 짧으면 재생 장치가 마지막 음절을 먹어 끊긴 것처럼 들린다.
+# VOICELAB_TAIL_SILENCE=0 이면 덧붙이지 않는다.
+TAIL_SILENCE_SEC = float(os.environ.get("VOICELAB_TAIL_SILENCE", "0.3"))
 
 class ModelDisabled(RuntimeError):
     pass
@@ -212,6 +219,7 @@ def synthesize(
         audio = np.asarray(out.audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             raise RuntimeError("모델 출력 샘플이 0개입니다.")
+        audio = ensure_tail_silence(audio, out.sample_rate, TAIL_SILENCE_SEC)
         if output_path is None:
             stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
             output_path = _unused_output(f"{_clip_token(clip_label or 'voice')}_{stamp}.wav")

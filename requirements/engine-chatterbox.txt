@@ -1,3 +1,25 @@
-# chatterbox-torch 엔진 전용 가상환경(.venv-chatterbox). PyTorch 는 setup 스크립트가 먼저 설치한다
+# chatterbox-torch 엔진 전용 가상환경(.venv-chatterbox)의 의존성. PyTorch 는 setup 스크립트가 먼저 설치한다
 # (NVIDIA GPU: CUDA 휠, 없으면 CPU 휠). chatterbox-tts 가 torch·transformers 버전을 고정하므로 서버와 나눈다.
-chatterbox-tts==0.1.7
+#
+# chatterbox-tts 본체는 engine-chatterbox-src.txt 로 따로(--no-deps) 설치한다.
+# PyPI 0.1.7 은 다국어 v2 가중치만 읽고, v3(t3_mtl23ls_v3)는 GitHub 의 최신 코드에만 있다.
+# 그 코드는 의존성 하나(resemble-perth)를 git 으로 받게 되어 있어, git 이 없는 윈도우에서도 되도록
+# 아래 목록(GitHub ab55923 의 pyproject.toml 과 같음, perth 만 PyPI 판)을 먼저 깐다.
+numpy>=1.24.0,<2.0.0; python_version < '3.13'
+numpy>=2.0.0; python_version >= '3.13'
+librosa==0.11.0
+s3tokenizer
+torch==2.6.0; python_version < '3.14'
+torchaudio==2.6.0; python_version < '3.14'
+transformers==5.2.0
+diffusers==0.29.0
+resemble-perth>=1.0.0
+# perth 가 pkg_resources 를 쓰는데 Python 3.12 새 가상환경에는 setuptools 가 없다(81 부터 pkg_resources 제거)
+setuptools<81
+conformer==0.3.2
+safetensors==0.5.3
+spacy-pkuseg
+pykakasi==2.3.0
+gradio==6.8.0
+pyloudnorm
+omegaconf

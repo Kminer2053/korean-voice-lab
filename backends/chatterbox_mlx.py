@@ -41,7 +41,7 @@ class ChatterboxMLX(Backend):
         if current_platform() != "mac-arm64":
             return False, "Apple Silicon Mac에서만 돕니다."
         if not (has_module("mlx") and has_module("mlx_audio")):
-            return False, "mlx·mlx-audio 패키지가 없습니다(requirements-mac.txt)."
+            return False, "mlx·mlx-audio 패키지가 없습니다(requirements/mac-mlx.txt)."
         return True, "사용 가능"
 
     def device(self) -> str:

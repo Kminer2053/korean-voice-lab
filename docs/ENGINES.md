@@ -28,6 +28,8 @@ PyTorch 엔진 패키지들은 서로 다른 버전을 고정합니다.
 
 찾는 순서: `settings.json`의 `engine_python.<엔진 id>` → `.venv-<모델 계열>` → `.venv-torch`.
 
+**Chatterbox 설치가 두 단계인 이유**: PyPI의 `chatterbox-tts` 0.1.7은 다국어 v2 가중치만 읽습니다. v3를 고르는 코드는 GitHub에만 있고, 그 코드는 의존성 하나(`resemble-perth`)를 git으로 받게 되어 있습니다. git이 없는 윈도우에서도 설치되도록 의존성은 `requirements/engine-chatterbox.txt`(PyPI 판)로 먼저 깔고, 본체는 고정한 GitHub 커밋의 ZIP을 `--no-deps`로 깝니다(`requirements/engine-chatterbox-src.txt`). PyPI 0.1.7이 깔려 있으면 v2로 돌고 장치 이름에 `(v2)`가 붙습니다.
+
 ## 공공 도입 검토 메모
 
 - **Chatterbox Multilingual v3**: 미국 Resemble AI가 학습한 0.5B 모델이고, 코드와 가중치 모두 MIT입니다. 한국어는 공식 지원 23개 언어에 들어 있습니다.
@@ -52,7 +54,7 @@ PyTorch 엔진 패키지들은 서로 다른 버전을 고정합니다.
 |---|---|
 | `qwen3-mlx` | 맥(M5, 16GB)에서 화면·API·명령줄·MCP·예전 `/synthesize` 호출까지 실제 생성 확인 |
 | `chatterbox-mlx` | 맥(M5, 16GB)에서 한국어 생성·비교 확인(아래 표). 첫 실행 때 가중치 약 2.7GB를 받습니다 |
-| `chatterbox-torch` | 코드 연결 완료. Windows CPU 실검증은 GitHub Actions `windows-smoke`로 진행 |
+| `chatterbox-torch` | 맥(M5, PyTorch MPS)에서 작업 프로세스로 v3 생성 확인. 다만 MPS로는 실시간보다 20배 이상 느려 맥에서는 MLX를 쓰세요. Windows CPU는 GitHub Actions `windows-smoke`로 검증 |
 | `qwen3-torch` | 코드 연결 완료. NVIDIA GPU 환경 검증 필요 |
 
 ### 맥 비교 결과(2026-11-17, M5 16GB)
@@ -67,6 +69,7 @@ PyTorch 엔진 패키지들은 서로 다른 버전을 고정합니다.
 - **기준선**: 같은 사람의 서로 다른 참조 녹음끼리 SIM이 0.753입니다. 두 엔진 모두 이 수준이라, 화자 유사도로는 원래 목소리와 구별이 어렵습니다.
 - **오독**: Chatterbox는 "할 일"을 "할의"처럼 붙여 읽는 경우가 20문장 중 3번 있었습니다. Qwen3는 오독이 없었습니다.
 - **숫자**: Chatterbox는 아라비아 숫자를 엉뚱하게 읽습니다(숫자 문장 CER 0.39~0.46). 그래서 Chatterbox 엔진에는 숫자를 한국어 소리로 바꿔 넘깁니다(`textnorm.py`: `2026년` → `이천이십육년`, `9시` → `아홉 시`, `12%` → `십이 퍼센트`). 바꾼 뒤에는 숫자 문장도 오독이 없습니다. 실제로 읽은 문장은 응답의 `spoken_text`에서 볼 수 있습니다.
+- **문장 끝**: Qwen3는 마지막 음절 바로 뒤에서 끝나(끝 무음 0.01~0.07초) 브라우저·블루투스 재생에서 끝이 먹혀 서둘러 끊긴 것처럼 들렸습니다. 음성 자체는 온전합니다(끝 신호를 미뤄 더 생성해 봐도 원래 끝까지 파형이 같고 뒤는 무음). 그래서 모든 엔진 결과의 끝 무음을 **최소 0.3초**로 맞춥니다(`VOICELAB_TAIL_SILENCE`, 0이면 끔). 여러 줄 문장의 줄 사이에도 0.3초 쉼을 둡니다. Chatterbox는 원래 0.4~0.6초 여운이 있어 바뀌지 않습니다.
 - **속도**: RTF는 생성 시간 ÷ 음성 길이입니다. Qwen3는 실시간의 약 2배, Chatterbox는 실시간 정도입니다.
 - **정리**: 맥에서는 Qwen3-MLX가 정확도·속도 모두 조금 낫습니다. 개발 주체 국가를 따지는 기관이라면 Chatterbox-MLX도 품질 차이가 작아 실사용에 충분합니다.
 
