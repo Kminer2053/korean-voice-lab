@@ -54,7 +54,7 @@ PyTorch 엔진 패키지들은 서로 다른 버전을 고정합니다.
 |---|---|
 | `qwen3-mlx` | 맥(M5, 16GB)에서 화면·API·명령줄·MCP·예전 `/synthesize` 호출까지 실제 생성 확인 |
 | `chatterbox-mlx` | 맥(M5, 16GB)에서 한국어 생성·비교 확인(아래 표). 첫 실행 때 가중치 약 2.7GB를 받습니다 |
-| `chatterbox-torch` | 맥(M5, PyTorch MPS)에서 작업 프로세스로 v3 생성 확인. 다만 MPS로는 실시간보다 20배 이상 느려 맥에서는 MLX를 쓰세요. Windows CPU는 GitHub Actions `windows-smoke`로 검증 |
+| `chatterbox-torch` | 맥(M5, PyTorch MPS)에서 작업 프로세스로 v3 생성 확인. 다만 MPS로는 실시간보다 20배 이상 느려 맥에서는 MLX를 쓰세요. Windows(GitHub Actions `windows-smoke`, CPU)에서 `setup.bat` 설치 → v3 생성(4.2초 음성에 56초) → 서버·HTTP API·일괄 생성 자체 점검까지 통과(2026-11-18). GPU 없는 윈도우는 느리므로 NVIDIA GPU를 권합니다 |
 | `qwen3-torch` | 코드 연결 완료. NVIDIA GPU 환경 검증 필요 |
 
 ### 맥 비교 결과(2026-11-17, M5 16GB)
