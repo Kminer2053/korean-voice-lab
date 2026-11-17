@@ -1,0 +1,27 @@
+# 개인 음성 자료 — 절대 올리지 않는다
+references/
+outputs/
+lexicon.json
+local/
+
+# 환경·캐시
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+
+# 오디오(예시 음성도 기본으로 막는다)
+*.wav
+*.m4a
+*.aiff
+*.aif
+*.mp3
+*.caf
+*.flac
+
+# 기록·임시
+*.log
+*.tmp
+.DS_Store
