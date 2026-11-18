@@ -32,7 +32,6 @@ MAX_FLOOR = 0.001  # 0.1%
 MAX_CODA_SEC = 0.45
 KEEP_SEC = 0.12  # 문장 마지막 음절의 여운으로 남기는 길이
 FADE_SEC = 0.02
-PIECE_GAP_SEC = 0.3  # 여러 줄을 이을 때 줄 사이 쉼
 
 
 def with_coda(text: str) -> str:
@@ -90,31 +89,18 @@ def generate(
     text: str,
     seed: int | None,
 ) -> tuple[np.ndarray, int, dict]:
-    """줄마다 꼬리말 방식으로 만든다. generate_once(text, seed) → (소리, 표본율).
+    """꼬리말 방식으로 만든다. generate_once(text, seed) → (소리, 표본율).
 
-    seed 를 주면 줄마다 seed, seed+1, … 순으로 시도한다(같은 입력이면 같은 결과).
+    여러 줄도 한 번에 만든다(줄바꿈에서 모델이 스스로 알맞은 쉼과 여운을 둔다). 꼬리말은 맨 끝에만 붙는다.
+    seed 를 주면 seed, seed+1, … 순으로 시도한다(같은 입력이면 같은 결과).
     """
-    lines = [line.strip() for line in text.split("\n") if line.strip()] or [text]
-    pieces: list[np.ndarray] = []
-    rate = 0
-    report: list[dict] = []
-    for line in lines:
-        chosen = None
-        tries: list[dict] = []
-        for attempt in range(MAX_TRIES):
-            audio, rate = generate_once(with_coda(line), None if seed is None else seed + attempt)
-            cut, info = cut_before_coda(audio, rate)
-            tries.append(info)
-            if cut is not None:
-                chosen = cut
-                break
-        if chosen is None:  # 끝내 못 자르면 꼬리말 없이(예전 방식)
-            chosen, rate = generate_once(line, seed)
-            chosen = np.asarray(chosen, dtype=np.float32).reshape(-1)
-        report.append({"tries": len(tries), "coda": "reason" not in tries[-1], "measures": tries})
-        pieces.append(chosen)
-    if len(pieces) > 1:
-        from audio_prep import ensure_tail_silence
-
-        pieces = [ensure_tail_silence(p, rate, PIECE_GAP_SEC) for p in pieces[:-1]] + pieces[-1:]
-    return np.concatenate(pieces), rate, {"ending": report}
+    tries: list[dict] = []
+    for attempt in range(MAX_TRIES):
+        audio, rate = generate_once(with_coda(text), None if seed is None else seed + attempt)
+        cut, info = cut_before_coda(audio, rate)
+        tries.append(info)
+        if cut is not None:
+            return cut, rate, {"ending": {"tries": len(tries), "coda": True, "measures": tries}}
+    audio, rate = generate_once(text, seed)  # 끝내 못 자르면 꼬리말 없이(보정 전 방식)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    return audio, rate, {"ending": {"tries": len(tries), "coda": False, "measures": tries}}
