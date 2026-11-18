@@ -163,6 +163,11 @@ def cut_before_coda(audio: np.ndarray, rate: int, max_coda_sec: float = MAX_CODA
     return None, {"reason": "no_gap"}
 
 
+def _merged(info: dict) -> bool:
+    """꼬리말이 문장 끝에 붙어 읽혀 나눌 쉼이 없던 시도."""
+    return info.get("reason") == "short_gap" and float(info.get("coda_sec") or 0) > MAX_CODA_NEWLINE_SEC
+
+
 def generate(
     generate_once: Callable[[str, int | None, int], tuple[np.ndarray, int]],
     text: str,
@@ -191,6 +196,8 @@ def generate(
         tries.append(info)
         if cut is not None:
             return cut, rate, {"ending": {"tries": len(tries), "coda": True, "runaways": runaways, "measures": tries}}
+        if len(tries) >= 2 and all(_merged(t) for t in tries[-2:]):
+            break  # 두 번 연달아 꼬리말이 문장 끝에 붙어 읽힘(예: 전화번호로 끝나는 문장) — 더 해도 같아 바로 꼬리말 없이
     if ENABLED and runaways < MAX_TRIES:
         # 자르기만 못 했으면 꼬리말 없이(보정 전 방식) 한 번 더
         fallback_seed = None if seed is None else seed + MAX_TRIES
