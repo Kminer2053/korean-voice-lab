@@ -904,6 +904,7 @@ RECORDER_JS = """
       S.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1}});
     }catch(e){ setNote('마이크를 열지 못했습니다: '+e.message+' — 브라우저 주소창의 마이크 권한을 허용하거나, 음성 메모로 녹음해 파일로 올리세요.'); return; }
     S.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    if (S.ctx.state === 'suspended') { try { await S.ctx.resume(); } catch(e) {} }  // 자동 재생 정책으로 멈춘 채 시작하면 녹음이 비므로
     const src = S.ctx.createMediaStreamSource(S.stream);
     S.proc = S.ctx.createScriptProcessor(4096,1,1);
     S.chunks=[]; S.peak=0;
