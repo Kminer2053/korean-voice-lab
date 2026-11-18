@@ -141,7 +141,7 @@ python3 selftest.py --generate                        # 실제 생성까지
 | 맥 M5 16GB (MLX) | `qwen3-mlx` | 0.67 | 최종 코드로 204개 중 202개 성공. 오류 2개는 일부러 대본을 틀리게 준 참조(이유를 담은 오류로 끝남). 짧은 참조(0.9–5.7초)·작은 녹음·잡음·울림 참조 모두 성공 | 통과 |
 | 맥 M5 16GB (MLX) | `chatterbox-mlx` | 0.96 | 192/192, 최종 코드 25/25 | 통과 |
 | 맥 M5 (PyTorch CPU) | `qwen3-torch` | 중앙값 4.1 | 24/24 | |
-| 윈도우 10, 4코어 CPU, GPU 없음 | `qwen3-torch` · `chatterbox-torch` | 중앙값 16.5 · 16.5 | Qwen 24/24 + 최종 코드 문장 12종 12/12(폭주·시간 초과 없음), Chatterbox 24/24 | 통과(최종 코드) |
+| 윈도우 10, 4코어 CPU, GPU 없음 | `qwen3-torch` · `chatterbox-torch` | 중앙값 16.5 · 16.5 | Qwen 24/24 + 최종 코드(02f8338) 문장 12종 12/12(폭주·시간 초과 없음), Chatterbox 24/24 | 통과(최종 코드) |
 | GitHub Actions 윈도우 CPU | `chatterbox-torch` | 약 9.5 | | 통과(설치·녹음 검사·생성·일괄) |
 
 - **찾아서 고친 것**
