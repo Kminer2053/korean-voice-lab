@@ -29,6 +29,7 @@ import numpy as np
 VERSION = 1  # 자르는 규칙이 바뀌면 올린다(일괄 생성 캐시 키). 폭주 상한은 정상 결과를 바꾸지 않아 그대로
 ENABLED = os.environ.get("VOICELAB_QWEN_CODA", "1") != "0"
 CODA = " 네."
+CODA_LATIN = " Yes."  # 영어로 끝나는 문장은 한국어 꼬리말과 이어 읽히지 않아 쉼이 짧다(견딤 시험에서 늘 실패)
 MAX_TRIES = 3
 
 HOP_SEC = 0.01
@@ -91,11 +92,20 @@ def bad_length_reason(audio: np.ndarray, rate: int, text: str) -> tuple[str, str
     return None
 
 
+def coda_for(text: str) -> str:
+    """마지막 문장이 주로 로마자면 영어 꼬리말, 아니면 한국어 꼬리말."""
+    last = re.split(r"[.!?…。？！\n]+\s*", text.strip().rstrip(".!?…。？！"))[-1]
+    latin = len(re.findall(r"[A-Za-z]", last))
+    hangul = len(re.findall(r"[가-힣]", last))
+    return CODA_LATIN if latin > hangul * 2 else CODA
+
+
 def with_coda(text: str) -> str:
+    coda = coda_for(text)
     text = text.rstrip()
     if not re.search(r"[.!?…~。？！]$", text):
         text += "."  # 끝에 문장부호가 없으면 꼬리말과 붙어 읽혀 쉼이 안 생긴다("안녕 네.")
-    return text + CODA
+    return text + coda
 
 
 def cut_before_coda(audio: np.ndarray, rate: int) -> tuple[np.ndarray | None, dict]:
