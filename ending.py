@@ -38,6 +38,7 @@ SCAN_GAP_SEC = 0.10  # 꼬리말 안의 짧은 틈은 건너뛰고 이보다 긴
 MIN_GAP_SEC = 0.20
 MAX_FLOOR = 0.001  # 0.1%
 MAX_CODA_SEC = 0.45
+MAX_CODA_NEWLINE_SEC = 0.6  # 줄을 바꿔 붙인 꼬리말은 홀로 읽혀 조금 길다(쉼이 확실해 잘못 자를 위험이 작음)
 KEEP_SEC = 0.12  # 문장 마지막 음절의 여운으로 남기는 길이
 FADE_SEC = 0.02
 
@@ -111,7 +112,7 @@ def with_coda(text: str, newline: bool = False) -> str:
     return text + coda
 
 
-def cut_before_coda(audio: np.ndarray, rate: int) -> tuple[np.ndarray | None, dict]:
+def cut_before_coda(audio: np.ndarray, rate: int, max_coda_sec: float = MAX_CODA_SEC) -> tuple[np.ndarray | None, dict]:
     """꼬리말 앞 쉼에서 자른 소리와 측정값. 기준을 못 맞추면 (None, 측정값)."""
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
     hop = max(1, int(rate * HOP_SEC))
@@ -149,7 +150,7 @@ def cut_before_coda(audio: np.ndarray, rate: int) -> tuple[np.ndarray | None, di
                 return None, {**info, "reason": "short_gap"}
             if info["floor"] > allowed:
                 return None, {**info, "reason": "no_silence"}
-            if info["coda_sec"] > MAX_CODA_SEC:
+            if info["coda_sec"] > max_coda_sec:
                 return None, {**info, "reason": "long_coda"}
             cut = int((start * HOP_SEC + min(KEEP_SEC, gap)) * rate)
             out = audio[:cut].copy()
@@ -186,7 +187,7 @@ def generate(
             continue
         if not ENABLED:
             return audio, rate, {"ending": {"tries": len(tries) + 1, "coda": False, "runaways": runaways, "measures": tries}}
-        cut, info = cut_before_coda(audio, rate)
+        cut, info = cut_before_coda(audio, rate, MAX_CODA_NEWLINE_SEC if attempt == 1 else MAX_CODA_SEC)
         tries.append(info)
         if cut is not None:
             return cut, rate, {"ending": {"tries": len(tries), "coda": True, "runaways": runaways, "measures": tries}}
