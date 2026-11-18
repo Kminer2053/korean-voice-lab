@@ -82,18 +82,16 @@ class Qwen3MLX(Backend):
         if self._model is None:
             self.load()
         mx.reset_peak_memory()
-        if ending.ENABLED:
-            audio, rate, stats = ending.generate(
-                lambda line, line_seed: self._generate_once(line, ref_wav, ref_text, line_seed), text, seed
-            )
-        else:
-            audio, rate = self._generate_once(text, ref_wav, ref_text, seed)
-            stats = {}
+        audio, rate, stats = ending.generate(
+            lambda line, line_seed, max_frames: self._generate_once(line, ref_wav, ref_text, line_seed, max_frames),
+            text,
+            seed,
+        )
         stats["peak_memory_bytes"] = int(mx.get_peak_memory())
         mx.clear_cache()
         return GenerationOutput(audio, rate, stats)
 
-    def _generate_once(self, text, ref_wav: Path, ref_text, seed) -> tuple[np.ndarray, int]:
+    def _generate_once(self, text, ref_wav: Path, ref_text, seed, max_frames: int) -> tuple[np.ndarray, int]:
         import mlx.core as mx
 
         if seed is not None:
@@ -105,6 +103,7 @@ class Qwen3MLX(Backend):
                 ref_audio=str(ref_wav),
                 ref_text=ref_text,
                 lang_code="korean",
+                max_tokens=int(max_frames),  # 폭주 막기(ending.budget_frames)
                 stream=False,
                 verbose=False,
             )

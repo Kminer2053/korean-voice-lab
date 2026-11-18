@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -51,6 +51,7 @@ class SynthesisReport:
     sample_rate: int
     output_samples: int
     peak_memory_bytes: int | None
+    stats: dict = field(default_factory=dict)  # 엔진별 측정값(Qwen3 말끝 보정 ending 등)
 
 
 def is_model_loaded() -> bool:
@@ -241,6 +242,7 @@ def synthesize(
             sample_rate=out.sample_rate,
             output_samples=output_samples,
             peak_memory_bytes=int(peak) if peak is not None else None,
+            stats={k: v for k, v in out.stats.items() if k != "peak_memory_bytes"},
         )
     finally:
         _LOCK.release()
