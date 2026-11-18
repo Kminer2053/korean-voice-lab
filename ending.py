@@ -100,8 +100,11 @@ def coda_for(text: str) -> str:
     return CODA_LATIN if latin > hangul * 2 else CODA
 
 
-def with_coda(text: str) -> str:
+def with_coda(text: str, newline: bool = False) -> str:
+    """꼬리말을 붙인다. newline 이면 줄을 바꿔 붙인다(모델이 줄바꿈에서 쉼을 두므로 쉼이 짧아 실패한 뒤에 쓴다)."""
     coda = coda_for(text)
+    if newline:
+        coda = "\n" + coda.lstrip()
     text = text.rstrip()
     if not re.search(r"[.!?…~。？！]$", text):
         text += "."  # 끝에 문장부호가 없으면 꼬리말과 붙어 읽혀 쉼이 안 생긴다("안녕 네.")
@@ -172,7 +175,8 @@ def generate(
     tries: list[dict] = []
     runaways = 0  # 길이가 문장과 맞지 않은 시도(끝맺지 못함·덜 읽음)
     for attempt in range(MAX_TRIES):
-        line = with_coda(text) if ENABLED else text
+        # 첫 시도는 띄어 붙이고(사용자 청취로 확인한 방식), 다시 만들 때는 한 번 줄바꿈으로 붙여 실패가 겹치지 않게 한다
+        line = with_coda(text, newline=attempt == 1) if ENABLED else text
         audio, rate = generate_once(line, None if seed is None else seed + attempt, budget_frames(line))
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         bad = bad_length_reason(audio, rate, line)
