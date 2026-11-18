@@ -30,7 +30,7 @@ _ACTIVE_ID: str | None = None
 
 
 
-# 결과 끝에 남길 최소 무음(초). 끝 쉼이 짧으면 재생 장치가 마지막 음절을 먹어 끊긴 것처럼 들린다.
+# 결과 끝에 남길 최소 무음(초). 문장 사이 쉼을 고르게 한다.
 # VOICELAB_TAIL_SILENCE=0 이면 덧붙이지 않는다.
 TAIL_SILENCE_SEC = float(os.environ.get("VOICELAB_TAIL_SILENCE", "0.3"))
 

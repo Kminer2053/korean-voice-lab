@@ -65,6 +65,14 @@ def load_16k(path: str):
     return mono.numpy()
 
 
+def trim_silence(x):
+    """앞뒤 무음을 걷어 낸다. 화자 임베딩은 무음 길이에 흔들려(끝 무음 0.2초에 SIM 0.05~0.08 하락) 채점 전에 맞춘다."""
+    import numpy as np
+
+    loud = np.flatnonzero(np.abs(x) > max(float(np.abs(x).max()) * 0.01, 1e-4))
+    return x[loud[0] : loud[-1] + 1] if loud.size else x
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bench", help="benchmark.py 결과 폴더")
@@ -97,7 +105,7 @@ def main() -> int:
 
         def embed(path: str) -> torch.Tensor:
             if path not in cache:
-                wav = torch.from_numpy(load_16k(path)).unsqueeze(0)
+                wav = torch.from_numpy(trim_silence(load_16k(path)).copy()).unsqueeze(0)
                 cache[path] = enc.encode_batch(wav).squeeze()
             return cache[path]
 

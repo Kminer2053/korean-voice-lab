@@ -146,6 +146,7 @@ backends/           엔진 구현(qwen3_mlx, qwen3_torch, chatterbox_mlx, chatte
 voices.py           말투 레지스트리 (references/voices.json)
 audio_prep.py       녹음 변환(WAV 직접, 그 밖은 PyAV, 맥은 afconvert 대체)·무음 검사
 textnorm.py         숫자를 한국어 소리로(숫자를 잘못 읽는 엔진용, 채점에도 사용)
+ending.py           Qwen3 말끝 보정(꼬리말을 붙여 만들고 그 앞 쉼에서 자름)
 voicelab_cli.py     명령줄
 mcp_server.py       MCP 서버(stdio)
 selftest.py         서버 점검

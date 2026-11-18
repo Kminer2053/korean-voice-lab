@@ -53,6 +53,9 @@ class Qwen3Torch(Backend):
         kwargs["dtype"] = torch.bfloat16 if self._device == "cuda" else torch.float32
         if self._device == "cuda" and has_module("flash_attn"):
             kwargs["attn_implementation"] = "flash_attention_2"
+        elif self._device == "mps":
+            # 맥 MPS 의 sdpa 는 이 모델의 GQA(헤드 16 대 8) 행렬곱에서 프로세스가 죽는다(incompatible dimensions)
+            kwargs["attn_implementation"] = "eager"
         self._model = Qwen3TTSModel.from_pretrained(self.info.model_id, **kwargs)
 
     def unload(self) -> None:
@@ -69,8 +72,24 @@ class Qwen3Torch(Backend):
     def generate(self, *, text, ref_wav: Path, ref_text, seed=None, language="ko") -> GenerationOutput:
         import torch
 
+        import ending
+
         if self._model is None:
             self.load()
+        if ending.ENABLED:
+            audio, rate, stats = ending.generate(
+                lambda line, line_seed: self._generate_once(line, ref_wav, ref_text, line_seed), text, seed
+            )
+        else:
+            audio, rate = self._generate_once(text, ref_wav, ref_text, seed)
+            stats = {}
+        if self._device == "cuda":
+            stats["peak_memory_bytes"] = int(torch.cuda.max_memory_allocated())
+        return GenerationOutput(audio, rate, stats)
+
+    def _generate_once(self, text, ref_wav: Path, ref_text, seed) -> tuple[np.ndarray, int]:
+        import torch
+
         if seed is not None:
             torch.manual_seed(int(seed))
         wavs, sample_rate = self._model.generate_voice_clone(
@@ -79,8 +98,4 @@ class Qwen3Torch(Backend):
             ref_audio=str(ref_wav),
             ref_text=ref_text,
         )
-        audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-        stats = {}
-        if self._device == "cuda":
-            stats["peak_memory_bytes"] = int(torch.cuda.max_memory_allocated())
-        return GenerationOutput(audio, int(sample_rate), stats)
+        return np.asarray(wavs[0], dtype=np.float32).reshape(-1), int(sample_rate)

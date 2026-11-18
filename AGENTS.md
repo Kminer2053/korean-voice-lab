@@ -65,6 +65,7 @@ Cursor·Claude Desktop(`mcpServers`)이나 Codex(`~/.codex/config.toml`)의 설�
 | `engine.py` | 엔진 실행기. 엔진 하나만 메모리에, 생성 잠금(한 번에 하나) |
 | `backends/` | 엔진 구현(모델 × 실행 방식)과 다른 가상환경용 작업 프로세스 |
 | `audio_prep.py` | 녹음 변환(WAV 직접, 그 밖은 PyAV, 맥 afconvert 대체)과 무음 검사 |
+| `ending.py` | Qwen3 말끝 보정(꼬리말 붙여 만들고 잘라 냄, 실패하면 seed 바꿔 다시) |
 | `voicelab_cli.py`, `mcp_server.py` | 명령줄, MCP |
 | `selftest.py` | 켜진 서버 점검(표준 라이브러리만) |
 | `tools/` | `smoke_engine.py` 엔진 단독 점검, `benchmark.py`·`evaluate.py` 엔진 비교 |

@@ -77,9 +77,25 @@ class Qwen3MLX(Backend):
     def generate(self, *, text, ref_wav: Path, ref_text, seed=None, language="ko") -> GenerationOutput:
         import mlx.core as mx
 
+        import ending
+
         if self._model is None:
             self.load()
         mx.reset_peak_memory()
+        if ending.ENABLED:
+            audio, rate, stats = ending.generate(
+                lambda line, line_seed: self._generate_once(line, ref_wav, ref_text, line_seed), text, seed
+            )
+        else:
+            audio, rate = self._generate_once(text, ref_wav, ref_text, seed)
+            stats = {}
+        stats["peak_memory_bytes"] = int(mx.get_peak_memory())
+        mx.clear_cache()
+        return GenerationOutput(audio, rate, stats)
+
+    def _generate_once(self, text, ref_wav: Path, ref_text, seed) -> tuple[np.ndarray, int]:
+        import mlx.core as mx
+
         if seed is not None:
             mx.random.seed(int(seed))
         # Base 복제: ref_audio + ref_text 만 넘긴다. voice·instruct 는 넘기지 않는다.
@@ -99,11 +115,9 @@ class Qwen3MLX(Backend):
         if not finals:
             raise RuntimeError("모델이 오디오를 반환하지 않았습니다.")
         pieces = [np.asarray(item.audio, dtype=np.float32).reshape(-1) for item in finals]
+        rate = int(finals[-1].sample_rate)
         if len(pieces) > 1:  # 줄마다 따로 만든 조각 사이에 쉼을 둔다(끝은 engine 이 맞춘다)
             from audio_prep import ensure_tail_silence
 
-            rate = int(finals[-1].sample_rate)
             pieces = [ensure_tail_silence(p, rate, 0.3) for p in pieces[:-1]] + pieces[-1:]
-        stats = {"peak_memory_bytes": int(mx.get_peak_memory())}
-        mx.clear_cache()
-        return GenerationOutput(np.concatenate(pieces), int(finals[-1].sample_rate), stats)
+        return np.concatenate(pieces), rate

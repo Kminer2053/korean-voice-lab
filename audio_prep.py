@@ -239,8 +239,8 @@ def reference_kind(path: Path) -> str:
 def ensure_tail_silence(audio: np.ndarray, rate: int, min_sec: float) -> np.ndarray:
     """끝 무음이 min_sec 보다 짧으면 무음을 덧붙인다(이미 충분하면 그대로).
 
-    Qwen3 는 마지막 음절 직후 바로 끝나(끝 무음 0.01~0.07초) 브라우저·블루투스 재생에서 끝이 먹혀
-    서둘러 끊긴 것처럼 들린다. 소리 자체는 온전하므로 자르지 않고 쉼만 더한다.
+    Qwen3 는 마지막 음절 직후 바로 끝나(끝 무음 0.01~0.07초) 다음 문장과 붙어 들린다. 문장 사이 쉼을
+    고르게 하려고 쉼만 더한다(말끝 자체는 ending.py 가 고친다).
     """
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
     if min_sec <= 0 or audio.size == 0:
