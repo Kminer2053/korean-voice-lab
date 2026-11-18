@@ -42,6 +42,14 @@ sys.path.insert(0, str(ROOT))
 KO_SCRIPT = "이 녹음은 자동 점검에만 쓰는 시험용 목소리입니다. 실제 사람의 목소리가 아닙니다."
 EN_SCRIPT = "This is a short reference recording made only for automated testing. It is not a real person."
 WRONG_SCRIPT = "오늘 점심은 김치찌개와 계란말이를 먹었습니다."
+# 짧은 참조 녹음: 녹음을 중간에서 자르면 대본과 어긋나므로, 온전한 짧은 문장을 따로 만든다
+SHORT_SCRIPTS = {
+    "short1": "안녕하세요.",
+    "short2": "오늘 날씨가 참 좋네요.",
+    "short3": "이 녹음은 시험용 목소리입니다.",
+    "short4": "이 녹음은 자동 점검에만 쓰는 시험용 목소리입니다.",
+    "short5": "이 녹음은 자동 점검에만 쓰는 시험용 목소리이고, 실제 사람의 목소리는 아닙니다.",
+}
 
 TEXTS = {
     "normal": "안녕하세요, 오늘 발표를 맡은 사람입니다.",
@@ -63,7 +71,7 @@ TEXTS = {
 }
 
 CORE_TEXTS = ["normal", "tiny", "long", "lines", "english", "mixed"]
-REF_VARIANTS = ["ko", "en", "short", "short3", "long", "pad", "noisy", "quiet", "clipped", "lowrate", "wrongtext"]
+REF_VARIANTS = ["ko", "en", "short1", "short2", "short3", "short4", "short5", "long", "pad", "noisy", "quiet", "clipped", "lowrate", "wrongtext"]
 
 
 # ---------------------------------------------------------------- 참조 녹음 만들기
@@ -136,8 +144,6 @@ def build_refs(folder: Path, ref_dir: Path | None) -> dict[str, tuple[Path, str]
     rng = np.random.default_rng(7)
     peak = float(np.abs(x).max()) or 1.0
     variants = {
-        "short": (x[: int(rate * 1.6)], KO_SCRIPT.split()[0] + " " + KO_SCRIPT.split()[1]),
-        "short3": (x[: int(rate * 3.0)], " ".join(KO_SCRIPT.split()[:4])),
         "long": (np.concatenate([x, np.zeros(int(rate * 0.5), np.float32)] * 3), " ".join([KO_SCRIPT] * 3)),
         "pad": (np.concatenate([np.zeros(rate * 2, np.float32), x, np.zeros(rate * 2, np.float32)]), KO_SCRIPT),
         "noisy": (x + rng.normal(0, np.sqrt(np.mean(x**2) / 10), x.size).astype(np.float32), KO_SCRIPT),
@@ -147,6 +153,16 @@ def build_refs(folder: Path, ref_dir: Path | None) -> dict[str, tuple[Path, str]
         "wrongtext": (x, WRONG_SCRIPT),
     }
     refs = {"ko": (ko, KO_SCRIPT), "en": (en, EN_SCRIPT)}
+    for name, script in SHORT_SCRIPTS.items():
+        path = folder / f"{name}.wav"
+        if not path.exists():
+            if ref_dir and (ref_dir / f"{name}.wav").exists():
+                shutil.copyfile(ref_dir / f"{name}.wav", path)
+            elif not ref_dir:
+                _os_tts(script, "ko", path)
+            else:
+                continue
+        refs[name] = (path, script)
     for name, (data, script) in variants.items():
         path = folder / f"{name}.wav"
         if not path.exists():
@@ -169,7 +185,7 @@ def expected_sec(text: str) -> float:
 def plan(suite: str, refs: list[str], seeds: list[int]) -> list[dict]:
     items: list[dict] = []
     if suite == "quick":
-        grid = [(r, t) for r in ["ko", "en", "short", "noisy"] for t in ["normal", "tiny", "long", "lines", "english", "mixed"]]
+        grid = [(r, t) for r in ["ko", "en", "short2", "noisy"] for t in ["normal", "tiny", "long", "lines", "english", "mixed"]]
         grid = [(r, t) for r, t in grid if r in refs or r.startswith("style:")] + [(r, "normal") for r in refs if r.startswith("style:")]
         seed_list = seeds[:1]
     else:
@@ -272,8 +288,15 @@ def supervise(args: argparse.Namespace) -> int:
             refs[f"style:{style.id}"] = (style.path, style.script)
     (out / "refs.json").write_text(json.dumps({k: (str(p), s) for k, (p, s) in refs.items()}, ensure_ascii=False, indent=1),
                                    encoding="utf-8")
+    if args.refs:
+        keep = set(args.refs.split(","))
+        refs = {k: v for k, v in refs.items() if k in keep or k == "ko"}
     seeds = [int(s) for s in args.seeds.split(",")]
     items = plan(args.suite, list(refs), seeds)
+    if args.refs:
+        items = [i for i in items if i["ref"] in keep]
+        for index, item in enumerate(items):
+            item["index"] = index
     plan_path = out / "plan.json"
     if plan_path.exists() and not args.fresh:
         old = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -289,6 +312,7 @@ def supervise(args: argparse.Namespace) -> int:
         if len(done) >= len(items):
             break
         proc = subprocess.Popen(cmd, cwd=str(ROOT))
+        timed_out = False
         while proc.poll() is None:
             time.sleep(1)
             cur = _current(out)
@@ -298,8 +322,9 @@ def supervise(args: argparse.Namespace) -> int:
                               "text": TEXTS[cur["text_id"]], "ok": False, "flags": ["timeout"],
                               "error": f"{args.timeout}초 안에 끝나지 않아 멈춤", "wall_sec": args.timeout})
                 print(f"[timeout] #{cur['index']} {cur['ref']} · {cur['text_id']}", file=sys.stderr, flush=True)
+                timed_out = True
                 break
-        if proc.poll() is not None and proc.returncode != 0:
+        if not timed_out and proc.poll() is not None and proc.returncode != 0:  # 시간 초과로 끊은 것은 정상 진행
             cur = _current(out)
             if cur and cur["index"] not in _done(out):
                 _append(out, {**{k: cur[k] for k in ("index", "ref", "text_id", "seed")}, "engine": args.engine,
@@ -346,6 +371,18 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
+def _ref_lengths(out: Path) -> str:
+    refs = json.loads((out / "refs.json").read_text(encoding="utf-8"))
+    parts = []
+    for name, (path, _script) in refs.items():
+        if name.startswith("style:"):
+            parts.append(name)
+            continue
+        with wave.open(path, "rb") as handle:
+            parts.append(f"{name} {handle.getnframes() / handle.getframerate():.1f}")
+    return ", ".join(parts)
+
+
 def summarise(out: Path, args: argparse.Namespace) -> int:
     rows = sorted((json.loads(line) for line in (out / "rows.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()),
                   key=lambda r: r["index"])
@@ -365,6 +402,7 @@ def summarise(out: Path, args: argparse.Namespace) -> int:
         "",
         f"- 환경: {env} · 장치 {device}",
         f"- 항목 {len(rows)}개 · 성공 {len(ok)}개 · 문제 표시 {len(flagged)}개 {counts or ''}",
+        f"- 참조 녹음 길이(초): {_ref_lengths(out)}",
     ]
     if ok:
         lines += [
@@ -401,8 +439,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("-e", "--engine", required=True, help="모델(qwen3, chatterbox) 또는 엔진 id")
     parser.add_argument("--suite", choices=["quick", "full"], default="quick")
-    parser.add_argument("--seeds", default="0,1", help="full 에서 쓸 seed 목록(quick 은 첫 값만)")
+    parser.add_argument("--seeds", default="0,10", help="full 에서 쓸 seed 목록(quick 은 첫 값만)")
     parser.add_argument("--styles", help="더할 등록 말투(쉼표 구분). 사용자 녹음이므로 결과는 개인 자료")
+    parser.add_argument("--refs", help="이 참조 변형만(쉼표 구분, 예: short1,short2,quiet)")
     parser.add_argument("--ref-dir", help="내장 음성 대신 쓸 ko.wav·en.wav 폴더(대본은 이 파일의 KO_SCRIPT·EN_SCRIPT)")
     parser.add_argument("--timeout", type=float, default=900, help="항목 하나의 최대 시간(초)")
     parser.add_argument("--fresh", action="store_true", help="이전 결과를 지우고 새로 시작")
