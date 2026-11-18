@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -29,7 +31,7 @@ LEXICON_PATH = local_env.ROOT / "lexicon.json"
 MAX_TEXT_CHARS = 2000
 
 # 화면과 /api/health 가 함께 보는 상태.
-STATUS: dict[str, Any] = {"phase": "idle", "detail": "", "last": None}
+STATUS: dict[str, Any] = {"phase": "idle", "detail": "", "last": None, "batch": None}
 
 
 @dataclass
@@ -49,6 +51,7 @@ class Result:
     seed: int | None = None
     cached: bool = False
     id: str | None = None
+    quality: dict[str, Any] = field(default_factory=dict)  # 말끝 보정(ending)·음량(audio) 기록
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,7 +72,17 @@ class Result:
             "device": self.device,
             "seed": self.seed,
             "cached": self.cached,
+            "quality": self.quality,
+            "warning": quality_warning(self.quality),
         }
+
+
+def quality_warning(quality: dict[str, Any] | None) -> str:
+    """사람이 확인해 볼 만한 결과면 짧은 이유(아니면 빈 문자열)."""
+    ending_info = (quality or {}).get("ending") or {}
+    if ending_info and not ending_info.get("coda", True) and ending.ENABLED:
+        return "말끝이 짧게 끝났을 수 있음(꼬리말 보정 실패) — 들어 보고 어색하면 다른 버전으로 다시 만드세요"
+    return ""
 
 
 # ---------------------------------------------------------------- 발음 사전
@@ -94,13 +107,21 @@ def save_lexicon(mapping: dict[str, str]) -> None:
 
 
 def apply_lexicon(text: str, extra: dict[str, str] | None = None, use_file: bool = True) -> str:
-    """긴 단어부터 바꾼다. [뺏지]처럼 대괄호로 쓴 소리 표기는 대괄호를 벗긴다."""
+    """긴 단어부터 바꾼다. [뺏지]처럼 대괄호로 쓴 소리 표기는 대괄호를 벗긴다.
+
+    로마자로 시작·끝나는 원문은 단어 단위로만 바꾼다(AI → 에이아이 를 넣어도 OpenAI·AIR 는 그대로).
+    """
     mapping = dict(load_lexicon()) if use_file else {}
     if extra:
         mapping.update({str(k): str(v) for k, v in extra.items() if str(k)})
     out = text
     for key in sorted(mapping, key=len, reverse=True):
-        out = out.replace(key, mapping[key])
+        if re.match(r"[A-Za-z0-9]", key[0]) or re.match(r"[A-Za-z0-9]", key[-1]):
+            left = r"(?<![A-Za-z0-9])" if re.match(r"[A-Za-z0-9]", key[0]) else ""
+            right = r"(?![A-Za-z0-9])" if re.match(r"[A-Za-z0-9]", key[-1]) else ""
+            out = re.sub(left + re.escape(key) + right, lambda _m, v=mapping[key]: v, out)
+        else:
+            out = out.replace(key, mapping[key])
     out = re.sub(r"\[([^\[\]/]+)\]", r"\1", out)
     return out
 
@@ -130,6 +151,7 @@ def health() -> dict[str, Any]:
         "model_loaded": engine.is_model_loaded(),
         "busy": engine.is_busy(),
         "phase": STATUS["phase"],
+        "batch": STATUS.get("batch"),  # 일괄 생성 중이면 {"done", "total", "id"}
         "styles": [{"id": s.id, "label": s.label, "ready": s.ready} for s in styles],
         "outputs_dir": str(local_env.OUTPUTS.resolve()),
     }
@@ -148,8 +170,14 @@ def synthesize(
     item_id: str | None = None,
     on_phase: Callable[[str], None] | None = None,
     wait_sec: float | None = None,
+    loudness: float | None = None,
+    sample_rate: int | None = None,
 ) -> Result:
-    """한 문장(또는 한 덩어리)을 고른 말투로 읽어 WAV 하나를 만든다."""
+    """한 문장(또는 한 덩어리)을 고른 말투로 읽어 WAV 하나를 만든다.
+
+    seed 를 주지 않으면 무작위로 정하고 결과에 남긴다(같은 seed 로 다시 만들면 같은 결과).
+    loudness(LUFS, 예: -16)·sample_rate(예: 48000)를 주면 그에 맞춰 저장한다.
+    """
     raw = (text or "").strip()
     if not raw:
         raise UserInputError("만들 문장이 비어 있습니다.")
@@ -178,6 +206,12 @@ def synthesize(
     if not backends.info(engine_id).reads_digits:
         spoken = spell_numbers(spoken)  # 숫자를 잘못 읽는 엔진은 한국어 소리로 바꿔 넘긴다(engine 에서도 같은 처리)
     target = Path(output_path).expanduser().resolve() if output_path else None
+    if seed is None:
+        seed = secrets.randbelow(2**31 - 1)  # 무작위지만 기록해 두어 같은 결과를 다시 얻을 수 있게
+    if sample_rate is not None and int(sample_rate) not in (16000, 22050, 24000, 44100, 48000):
+        raise UserInputError("sample_rate 는 16000, 22050, 24000, 44100, 48000 중 하나여야 합니다.")
+    if loudness is not None and not -40 <= float(loudness) <= -5:
+        raise UserInputError("loudness 는 -40 ~ -5 LUFS 사이여야 합니다(영상은 보통 -16, 유튜브 -14).")
 
     def phase(name: str) -> None:
         _set_phase(name)
@@ -195,10 +229,13 @@ def synthesize(
             output_path=target,
             seed=seed,
             wait_sec=wait_sec,
+            loudness_lufs=loudness,
+            export_rate=sample_rate,
         )
     except Exception as exc:
         _set_phase("error", str(exc))
         raise
+    quality = {k: v for k, v in (report.stats or {}).items() if k in ("ending", "audio")}
     try:
         records.append(
             {
@@ -216,6 +253,8 @@ def synthesize(
                 "output_samples": report.output_samples,
                 "output_path": str(report.output_path),
                 "generation_text": raw,
+                "seed": seed,
+                "quality": quality,
             }
         )
     except Exception as exc:  # 기록 실패가 생성 결과를 막지 않게 한다.
@@ -241,6 +280,7 @@ def synthesize(
         device=report.device,
         seed=seed,
         id=item_id,
+        quality=quality,
     )
 
 
@@ -306,7 +346,7 @@ def safe_name(value: str) -> str:
     return cleaned[:60] or "item"
 
 
-def _item_digest(item: BatchItem, style: voices.Style, engine_id: str) -> str:
+def _item_digest(item: BatchItem, style: voices.Style, engine_id: str, options: dict | None = None) -> str:
     fields = {
         "text": apply_lexicon(item.text, item.replace),
         "style": style.id,
@@ -321,12 +361,18 @@ def _item_digest(item: BatchItem, style: voices.Style, engine_id: str) -> str:
         fields["text"] = spell_numbers(fields["text"])  # 숫자 읽기 규칙이 바뀌면 다시 만든다
     if backends.info(engine_id).family == "qwen3" and ending.ENABLED:
         fields["ending"] = ending.VERSION  # 말끝 보정 규칙이 바뀌면 다시 만든다
+    for name, value in (options or {}).items():
+        if value is not None:
+            fields[name] = value  # 음량·표본율을 지정했을 때만(기본 결과의 캐시 키는 그대로)
     key = json.dumps(
         fields,
         ensure_ascii=False,
         sort_keys=True,
     )
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+
+
+CACHE_DIR = ".voicelab-cache"  # 일괄 결과 폴더 안: 내용(문장·말투·설정)별로 만든 WAV 를 모아 둔다
 
 
 def run_batch(
@@ -337,11 +383,26 @@ def run_batch(
     default_engine: str | None = None,
     skip_existing: bool = True,
     on_item: Callable[[int, int, dict[str, Any]], None] | None = None,
+    loudness: float | None = None,
+    sample_rate: int | None = None,
+    prune: bool = False,
+    timeline: bool = False,
+    gap_sec: float = 0.4,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """문장마다 WAV 하나. out_dir/manifest.json 에 결과를 남기고, 같은 문장·말투는 다시 만들지 않는다."""
+    """문장마다 WAV 하나. out_dir/manifest.json 에 결과를 남긴다.
+
+    - 같은 문장·말투·설정은 다시 만들지 않는다. 문장 순서가 바뀌어 파일 이름(번호)이 달라져도
+      out_dir/.voicelab-cache 에서 찾아 쓴다. 다른 버전(seed)으로 다시 만들어도 이전 것은 그 폴더에 남는다.
+    - 한 문장이 실패해도 나머지는 계속 만든다.
+    - prune: 이번 목록에 없는 예전 파일은 _stale/ 로 옮기고 manifest 에서 뺀다(지우지 않음).
+    - timeline: 순서대로 이어 붙인 narration.wav 와 자막 narration.srt 를 만들고, 항목마다 start_sec·end_sec 를 넣는다.
+    - should_stop() 이 True 가 되면 다음 문장부터 멈춘다.
+    """
     items = list(items)
     folder = Path(out_dir).expanduser().resolve()
     folder.mkdir(parents=True, exist_ok=True)
+    cache = folder / CACHE_DIR
     manifest_path = folder / "manifest.json"
     manifest: dict[str, Any] = {}
     if manifest_path.is_file():
@@ -350,26 +411,51 @@ def run_batch(
             manifest = loaded.get("items", {}) if isinstance(loaded, dict) else {}
         except (OSError, json.JSONDecodeError):
             manifest = {}
+    options = {"loudness": loudness, "sample_rate": sample_rate}
     results: list[dict[str, Any]] = []
     started = time.perf_counter()
     used: set[str] = set()
+    order: list[str] = []
+    stopped = False
+
+    def save_manifest() -> None:
+        manifest_path.write_text(
+            json.dumps({"api_version": API_VERSION, "order": order, "items": manifest}, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8",
+        )
+
     for index, item in enumerate(items, start=1):
         key = safe_name(item.id) if item.id else f"{index:03d}"
         while key in used:
             key = f"{key}-{index}"
         used.add(key)
+        order.append(key)
         wav = folder / f"{key}.wav"
+        STATUS["batch"] = {"done": index - 1, "total": len(items), "id": key}
+        if should_stop is not None and should_stop():
+            stopped = True
+            entry = {"ok": False, "id": key, "text": item.text, "error": "멈춤 요청으로 만들지 않음", "skipped": True}
+            results.append(entry)
+            if on_item is not None:
+                on_item(index, len(items), entry)
+            continue
         try:
             style = voices.resolve(item.style or default_style)
             try:
                 engine_id = engine.resolve_engine(item.engine or default_engine)
             except engine.ModelDisabled as exc:
                 raise UserInputError(str(exc)) from exc
-            digest = _item_digest(item, style, engine_id)
+            digest = _item_digest(item, style, engine_id, options)
             prev = manifest.get(key) or {}
+            cached_wav = cache / f"{digest}.wav"
             if skip_existing and wav.is_file() and prev.get("sha") == digest:
                 entry = dict(prev)
                 entry.update({"ok": True, "id": key, "path": str(wav), "file": wav.name, "cached": True})
+            elif skip_existing and cached_wav.is_file() and _cache_record(cache, digest):
+                shutil.copyfile(cached_wav, wav)  # 번호가 바뀌었거나 예전 버전으로 돌아감 — 다시 만들지 않음
+                entry = dict(_cache_record(cache, digest))
+                entry.update({"ok": True, "id": key, "path": str(wav), "file": wav.name, "cached": True, "sha": digest})
+                manifest[key] = {k: v for k, v in entry.items() if k not in {"ok", "cached"}}
             else:
                 result = synthesize(
                     item.text,
@@ -379,31 +465,114 @@ def run_batch(
                     engine_name=engine_id,
                     replace=item.replace,
                     item_id=key,
+                    loudness=loudness,
+                    sample_rate=sample_rate,
                 )
                 entry = result.to_dict()
                 entry["id"] = key
                 entry["sha"] = digest
                 manifest[key] = {k: v for k, v in entry.items() if k not in {"ok", "cached"}}
-                manifest_path.write_text(
-                    json.dumps({"api_version": API_VERSION, "items": manifest}, ensure_ascii=False, indent=1) + "\n",
-                    encoding="utf-8",
-                )
+                cache.mkdir(exist_ok=True)
+                shutil.copyfile(wav, cached_wav)
+                (cache / f"{digest}.json").write_text(
+                    json.dumps({k: v for k, v in entry.items() if k not in {"ok", "cached", "path", "file", "id"}},
+                               ensure_ascii=False), encoding="utf-8")
+            save_manifest()
         except Exception as exc:
             entry = {"ok": False, "id": key, "text": item.text, "error": str(exc)}
         results.append(entry)
         if on_item is not None:
             on_item(index, len(items), entry)
+    STATUS["batch"] = None
+    if prune:
+        stale = [k for k in list(manifest) if k not in used]
+        for k in stale:
+            old = folder / f"{k}.wav"
+            if old.is_file():
+                (folder / "_stale").mkdir(exist_ok=True)
+                old.replace(folder / "_stale" / old.name)
+            manifest.pop(k, None)
+    extras: dict[str, str] = {}
+    if timeline:
+        extras = _write_timeline(folder, results, gap_sec)
+        for entry in results:
+            if entry.get("ok") and entry["id"] in manifest:
+                manifest[entry["id"]].update({k: entry[k] for k in ("start_sec", "end_sec") if k in entry})
+    save_manifest()
     ok = sum(1 for r in results if r.get("ok"))
     return {
         "ok": ok == len(results),
         "count": len(results),
         "succeeded": ok,
         "failed": len(results) - ok,
+        "stopped": stopped,
         "out_dir": str(folder),
         "manifest": str(manifest_path),
         "elapsed_sec": round(time.perf_counter() - started, 2),
         "items": results,
+        **extras,
     }
+
+
+def _cache_record(cache: Path, digest: str) -> dict | None:
+    try:
+        return json.loads((cache / f"{digest}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _srt_time(sec: float) -> str:
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float) -> dict[str, str]:
+    """성공한 항목을 순서대로 이어 붙인 narration.wav 와 자막 narration.srt. 항목에 start_sec·end_sec 를 넣는다."""
+    import wave
+
+    import numpy as np
+
+    import audio_fx
+
+    pieces: list[np.ndarray] = []
+    lines: list[str] = []
+    rate = None
+    cursor = 0.0
+    number = 0
+    for entry in results:
+        if not entry.get("ok"):
+            continue
+        with wave.open(entry["path"], "rb") as handle:
+            this_rate = handle.getframerate()
+            audio = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2").astype(np.float32) / 32768.0
+        if rate is None:
+            rate = this_rate
+        elif this_rate != rate:
+            audio = audio_fx.resample(audio, this_rate, rate)
+        if pieces:
+            pieces.append(np.zeros(int(gap_sec * rate), dtype=np.float32))
+            cursor += gap_sec
+        duration = audio.size / rate
+        levels = audio_fx.frame_db(audio, rate)
+        mask, _floor, _speech = audio_fx.speech_mask(levels)
+        voiced = np.flatnonzero(mask)
+        speech_end = (voiced[-1] * audio_fx.HOP_SEC + audio_fx.FRAME_SEC) if voiced.size else duration
+        entry["start_sec"] = round(cursor, 3)
+        entry["end_sec"] = round(cursor + duration, 3)
+        number += 1
+        lines += [str(number), f"{_srt_time(cursor)} --> {_srt_time(cursor + min(duration, speech_end + 0.2))}", entry.get("text", ""), ""]
+        pieces.append(audio)
+        cursor += duration
+    if rate is None:
+        return {}
+    wav_path = folder / "narration.wav"
+    srt_path = folder / "narration.srt"
+    audio_prep.write_pcm16(wav_path, np.concatenate(pieces), rate)
+    srt_path.write_text("\n".join(lines), encoding="utf-8")
+    return {"narration_wav": str(wav_path), "narration_srt": str(srt_path)}
 
 
 def register_reference(
@@ -414,8 +583,21 @@ def register_reference(
     label: str | None = None,
     description: str | None = None,
 ) -> voices.Style:
-    """WAV/M4A 녹음을 16-bit 모노 WAV 로 바꿔 references/ 에 두고 말투에 연결한다."""
-    prepared = audio_prep.prepare_upload(str(audio_file))
-    if prepared.rms < audio_prep.NEAR_SILENCE_RMS:
-        raise UserInputError("녹음이 무음에 가깝습니다. 다시 녹음하세요.")
-    return voices.register(style_id, prepared.wav_path, script, label=label, description=description)
+    """녹음을 검사해(대본 맞춤·길이·잡음·찢어짐 등) 다듬은 16-bit 모노 WAV 로 references/ 에 두고 말투에 연결한다.
+
+    검사에서 실패 항목이 있으면 등록하지 않고 이유를 모두 담아 UserInputError 를 낸다.
+    """
+    import audio_fx
+
+    script = (script or "").strip()
+    prepared = audio_prep.prepare_upload(str(audio_file), script)
+    qc = prepared.qc or {}
+    if audio_fx.has_failure(qc):
+        prepared.wav_path.unlink(missing_ok=True)  # 거절한 녹음은 references/ 에 남기지 않는다
+        raise UserInputError("이 녹음은 등록하지 않았습니다.\n" + audio_fx.qc_text(qc))
+    return voices.register(style_id, prepared.wav_path, script, label=label, description=description, qc=qc)
+
+
+def check_reference(audio_file: str | Path, script: str | None = None) -> dict:
+    """등록하지 않고 검사만 한다(화면 미리 보기·API)."""
+    return audio_prep.prepare_upload(str(audio_file), script, save=False).qc or {}

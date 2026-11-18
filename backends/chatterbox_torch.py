@@ -16,8 +16,17 @@ CFG_WEIGHT = 0.5
 
 
 def pick_torch_device() -> str:
-    """CUDA → MPS(맥) → CPU. 문자열로 돌려준다(Windows CPU에서 torch.device 객체를 넘기면 실패하는 문제 회피)."""
+    """CUDA → MPS(맥) → CPU. 문자열로 돌려준다(Windows CPU에서 torch.device 객체를 넘기면 실패하는 문제 회피).
+
+    VOICELAB_TORCH_DEVICE=cpu|cuda|mps 로 강제할 수 있다(시험·문제 해결용).
+    """
+    import os
+
     import torch
+
+    forced = os.environ.get("VOICELAB_TORCH_DEVICE", "").strip().lower()
+    if forced in ("cpu", "cuda", "mps"):
+        return forced
 
     if torch.cuda.is_available():
         return "cuda"

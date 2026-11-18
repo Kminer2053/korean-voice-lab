@@ -4,6 +4,8 @@
 자동 생성 문서는 서버의 `/docs`(Swagger)에서 볼 수 있습니다.
 
 - 문자 인코딩은 UTF-8입니다. 결과는 16-bit PCM 모노 WAV, 24kHz입니다.
+- 결과 앞 무음이 0.15초보다 길면 0.1초로 줄입니다(문장 클립을 이어 붙일 때 간격이 고르게). 결과가 1.0을 넘으면 잘라 내지 않고 전체를 조금 줄입니다.
+- 서버 환경변수 `VOICELAB_TARGET_LUFS`(예: `-16`)·`VOICELAB_SAMPLE_RATE`(예: `48000`)로 모든 결과의 음량·표본율 기본값을 정할 수 있습니다(기본은 끔).
 - 결과 끝에는 최소 0.3초 무음을 남깁니다. 서버 환경변수 `VOICELAB_TAIL_SILENCE`(초, 0이면 끔)로 바꿉니다. `duration_sec`에는 이 무음이 포함됩니다.
 - Qwen3 엔진은 말끝을 온전히 읽히려고 문장 뒤에 꼬리말을 붙여 만든 뒤 잘라 냅니다(`docs/ENGINES.md`). 깨끗이 못 자르면 seed를 바꿔 다시 만들므로 그 문장은 시간이 더 걸립니다. 같은 `seed`면 결과는 같습니다. `VOICELAB_QWEN_CODA=0`이면 끕니다.
 - `api_version`이 `"1"`인 동안에는 아래 필드를 없애거나 뜻을 바꾸지 않습니다. 필드는 더해질 수 있습니다.
@@ -97,6 +99,10 @@
 | `ref_text` | string | 없음 | 참조 녹음 대본을 이번에만 바꿀 때 |
 | `output_path` | string | 없음 | 결과를 쓸 절대 경로(서버와 같은 컴퓨터). 없으면 `outputs/` |
 | `speed` | number | 없음 | 받기만 하고 쓰지 않습니다. 모델이 아직 지원하지 않습니다. |
+| `loudness` | number | 없음 | 통합 음량(LUFS, ITU-R BS.1770)으로 맞춥니다. 영상은 보통 `-16`, 유튜브 `-14`. 트루 피크는 -1 dBTP 아래로 둡니다. 없으면 모델 출력 그대로 |
+| `sample_rate` | number | 없음 | 저장 표본율(16000·22050·24000·44100·48000). 영상 편집은 `48000`. 없으면 모델 그대로(24000) |
+
+`seed`를 주지 않으면 서버가 무작위로 정하고 응답의 `seed`에 남깁니다. 같은 `seed`로 다시 부르면 같은 결과가 나옵니다(마음에 든 결과를 다시 얻을 때).
 
 응답:
 
@@ -112,9 +118,16 @@
   "text": "원문", "spoken_text": "발음 사전(과 Chatterbox면 숫자 읽기) 적용 뒤 실제로 읽힌 문장",
   "duration_sec": 3.04, "sample_rate": 24000, "generate_sec": 1.6, "load_sec": 0.0,
   "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit", "engine": "qwen3-mlx", "device": "mlx-metal",
-  "seed": null, "cached": false
+  "seed": 1834527711, "cached": false,
+  "quality": {"ending": {"tries": 1, "coda": true, "runaways": 0}, "audio": {"lufs": -21.3, "peak_dbfs": -4.2}},
+  "warning": ""
 }
 ```
+
+- `quality.ending`(Qwen3만): 말끝 보정 시도 수, 꼬리말 보정 성공 여부, 길이가 맞지 않아 다시 만든 횟수.
+- `quality.audio`: 결과의 통합 음량·피크. `loudness`를 주면 `gain_db`·`true_peak_dbtp`도 들어갑니다.
+- `warning`: 사람이 들어 볼 만한 결과면 이유(예: 말끝 보정 실패로 끝이 짧을 수 있음). 비어 있으면 문제없음.
+- Qwen3가 끝내 문장을 끝맺지 못하거나(대본·녹음 불일치가 흔한 원인) 덜 읽으면 긴 엉터리 소리 대신 500 오류와 이유를 돌려줍니다.
 
 - `format: "base64"`: 위 JSON에 `audio_base64`가 더해집니다.
 
@@ -138,9 +151,16 @@
 | `out_dir` | string | `outputs/batch-시각` | 결과 폴더(절대 경로, 서버와 같은 컴퓨터) |
 | `skip_existing` | bool | `true` | 같은 문장·말투·참조 녹음·seed로 이미 만든 파일은 다시 만들지 않습니다. |
 | `format` | `json` \| `zip` | `json` | `zip`이면 WAV와 manifest를 묶어 본문으로 돌려줍니다. |
+| `loudness` | number | 없음 | 모든 문장을 같은 통합 음량(LUFS)으로. 예: `-16` |
+| `sample_rate` | number | 없음 | 저장 표본율. 예: `48000` |
+| `timeline` | bool | `false` | 순서대로 이어 붙인 `narration.wav`와 자막 `narration.srt`도 만들고, 항목마다 `start_sec`·`end_sec`를 넣습니다. |
+| `gap_sec` | number | `0.4` | `timeline`의 문장 사이 쉼(초) |
+| `prune` | bool | `false` | 이번 목록에 없는 예전 결과 파일을 `_stale/`로 옮기고 manifest에서 뺍니다(지우지 않음). |
 
 파일 이름은 `id`가 있으면 `<id>.wav`(안전한 글자만 남김), 없으면 `001.wav`, `002.wav`처럼 순번입니다.
-`out_dir/manifest.json`에 항목별 결과와 입력 해시(`sha`)를 남깁니다. 재사용 판단은 이 해시로 하고, 해시에는 엔진 id도 들어갑니다(엔진을 바꾸면 다시 만듦).
+`out_dir/manifest.json`에 항목별 결과와 입력 해시(`sha`), 이번 순서(`order`)를 남깁니다. 재사용 판단은 이 해시로 하고, 해시에는 엔진 id와 지정한 `loudness`·`sample_rate`도 들어갑니다(바꾸면 다시 만듦).
+만든 결과는 `out_dir/.voicelab-cache/<sha>.wav`에도 둡니다. 그래서 대본 중간에 줄을 넣어 번호가 밀려도 바뀐 줄만 새로 만들고, 항목에 다른 `seed`를 주어 다시 만들어도 이전 버전이 그 폴더에 남습니다.
+일괄 생성 중에는 `GET /api/health`의 `batch`에 `{"done", "total", "id"}`가 나옵니다(명령줄은 이것으로 진행을 보여 줍니다).
 
 응답(`format: "json"`):
 
@@ -160,7 +180,25 @@
 ## `POST /api/references`: 참조 녹음 등록(multipart)
 
 필드는 `style`(id), `script`(녹음에서 실제로 읽은 문장), `file`(WAV·M4A·MP3·AIFF·CAF·FLAC)이고, 새 말투면 `label`·`description`도 받습니다.
-녹음은 16-bit 모노 WAV로 바꿔 `references/`에 저장합니다. 무음에 가까우면 400을 돌려줍니다.
+
+등록 전에 녹음을 검사합니다(다듬기 전 원본 기준). 실패 항목이 있으면 등록하지 않고 400과 항목별 이유를 돌려줍니다.
+
+| 검사 | 실패(등록 안 함) | 경고 |
+|---|---|---|
+| 길이(말소리 구간) | 3초 미만, 30초 초과 | 5–15초 밖 |
+| 대본 맞춤(대본 음절 ÷ 말소리 초) | 초당 1.5음절 미만·10음절 초과(대본과 녹음이 다름, 녹음이 중간에 끊김) | 4–8.5 밖 |
+| 대본 | 비었거나 5음절 미만 | |
+| 찢어짐(클리핑) | 표본 0.1% 초과 또는 평평한 꼭대기가 초당 0.5번 초과 | 조금이라도 있으면 |
+| 잡음(말소리와 잡음 바닥 차이) | 15dB 미만 | 25dB 미만 |
+| 음질 | 표본율 16kHz 미만 | 4–8kHz 대역이 거의 없음(블루투스·전화) |
+| 끝 잘림·첫소리 잘림 | | 말소리가 파일 끝·처음에 붙어 있음 |
+
+통과하면 직류 성분 제거, 70Hz 아래 웅웅거림 줄이기, 앞뒤 무음을 0.2/0.3초로 정리, 말소리 크기를 -20dBFS 근처로 맞춘 뒤 16-bit 모노 WAV로 `references/`에 저장합니다.
+응답의 `qc`에 측정값(`metrics`)과 항목별 판정(`checks`)이 들어갑니다. 이 기록은 말투 정보(`GET /api/styles`)에도 남습니다.
+
+### `POST /api/references/check`
+
+같은 검사를 등록 없이 합니다(multipart `file`, 선택 `script`). `{"ok": 통과 여부, "qc": {...}}`를 돌려줍니다.
 
 ```bash
 curl -s -X POST http://127.0.0.1:7860/api/references \
@@ -173,7 +211,8 @@ curl -s -X POST http://127.0.0.1:7860/api/references \
 
 ## `GET /api/lexicon`, `PUT /api/lexicon`
 
-발음 사전 `{"원문": "읽을 소리"}`를 읽고 통째로 바꿉니다. 문장 안에 `[뺏지]`처럼 대괄호로 소리를 직접 적으면 대괄호만 벗겨 읽습니다(`[/]`는 그대로 둡니다).
+발음 사전 `{"원문": "읽을 소리"}`를 읽고 통째로 바꿉니다. 영문·숫자로 시작하거나 끝나는 원문은 단어 단위로만 바꿉니다(`AI`를 넣어도 `OpenAI`는 그대로).
+문장 안에 `[뺏지]`처럼 대괄호로 소리를 직접 적으면 대괄호만 벗겨 읽습니다(`[/]`는 그대로 둡니다).
 
 ---
 

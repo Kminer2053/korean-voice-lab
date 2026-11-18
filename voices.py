@@ -77,6 +77,7 @@ class Style:
     prosody: str = ""
     description: str = ""
     builtin: bool = False
+    qc: dict | None = None  # 등록할 때 녹음 검사 결과(audio_fx.analyse_reference)
 
     @property
     def path(self) -> Path | None:
@@ -151,10 +152,13 @@ def list_styles() -> list[Style]:
                 id=builtin.id,
                 label=str(entry.get("label") or builtin.label),
                 file=str(entry.get("file") or ""),
-                script=str(entry.get("script") or builtin.script) if entry.get("file") else builtin.script,
+                # 대본 칸이 있는 기록은 그대로 쓴다(빈 대본을 읽지 않은 기본 대본으로 바꾸지 않음).
+                # 예전 기록(대본 칸 없음)만 기본 대본을 읽었다고 본다.
+                script=str(entry["script"] if "script" in entry else builtin.script) if entry.get("file") else builtin.script,
                 prosody=builtin.prosody,
                 description=builtin.description,
                 builtin=True,
+                qc=entry.get("qc") if isinstance(entry.get("qc"), dict) else None,
             )
         )
     for style_id, entry in raw.items():
@@ -171,6 +175,7 @@ def list_styles() -> list[Style]:
                 prosody=str(entry.get("prosody") or ""),
                 description=str(entry.get("description") or ""),
                 builtin=False,
+                qc=entry.get("qc") if isinstance(entry.get("qc"), dict) else None,
             )
         )
     return result
@@ -202,13 +207,16 @@ def register(
     *,
     label: str | None = None,
     description: str | None = None,
+    qc: dict | None = None,
 ) -> Style:
     """참조 녹음을 말투에 연결한다. wav_path 는 references/ 안의 준비된 WAV 여야 한다."""
     style_id = (style_id or "").strip().lower()
     style_id = LEGACY_ALIASES.get(style_id, style_id)
     if not STYLE_ID_PATTERN.match(style_id):
         raise UserInputError("말투 ID는 영문 소문자·숫자·-·_ 로 1–32자여야 합니다. 예: narration2")
-    cleaned = (script or "").strip()  # 비워도 등록은 된다. 대본이 필요한 엔진(Qwen3)은 생성 때 알려 준다.
+    cleaned = (script or "").strip()
+    if not cleaned:
+        raise UserInputError("녹음에서 실제로 읽은 문장을 적어 주세요. 대본이 녹음과 다르면 Qwen3 가 문장을 끝맺지 못합니다.")
     path = Path(wav_path)
     if not usable_reference(path):
         raise UserInputError("참조 녹음이 없거나 무음에 가깝습니다. 다시 녹음하거나 다른 파일을 올리세요.")
@@ -217,6 +225,10 @@ def register(
         entry = dict(raw.get(style_id) or {})
         entry["file"] = path.name
         entry["script"] = cleaned
+        if qc is not None:
+            entry["qc"] = qc
+        else:
+            entry.pop("qc", None)
         if style_id in BUILTIN_BY_ID:
             entry.pop("label", None)
             if label and label.strip() and label.strip() != BUILTIN_BY_ID[style_id].label:
