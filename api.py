@@ -43,7 +43,9 @@ class TTSRequest(BaseModel):
     use_lexicon: bool = Field(True, description="lexicon.json 발음 사전을 적용할지")
     ref_text: str | None = Field(None, description="참조 녹음 대본을 이번에만 바꿀 때")
     output_path: str | None = Field(None, description="결과를 쓸 경로(서버와 같은 컴퓨터). 없으면 outputs/")
-    speed: float | None = Field(None, description="받기만 하고 쓰지 않는다(모델이 아직 지원하지 않음)")
+    speed: float | None = Field(None, description="말 빠르기 0.8–1.25(음높이는 그대로). 1 = 그대로, 1.1 = 10% 빠르게")
+    loudness: float | None = Field(None, description="통합 음량(LUFS)으로 맞춤. 예: -16(영상), -14(유튜브). 없으면 모델 출력 그대로")
+    sample_rate: int | None = Field(None, description="저장 표본율. 예: 48000(영상 편집). 없으면 모델 그대로(24000)")
 
     def style_name(self) -> str | None:
         return self.style or self.style_id or self.voice
@@ -57,6 +59,13 @@ class BatchRequest(BaseModel):
     out_dir: str | None = Field(None, description="결과 폴더(서버 컴퓨터). 없으면 outputs/batch-시각")
     skip_existing: bool = True
     format: Literal["json", "zip"] = "json"
+    loudness: float | None = Field(None, description="모든 문장을 같은 통합 음량(LUFS)으로. 예: -16")
+    sample_rate: int | None = Field(None, description="저장 표본율. 예: 48000")
+    prune: bool = Field(False, description="이번 목록에 없는 예전 파일을 _stale/ 로 옮김")
+    timeline: bool = Field(False, description="이어 붙인 narration.wav 와 자막 narration.srt 도 만듦")
+    gap_sec: float = Field(0.4, description="timeline 에서 문장 사이 쉼(초)")
+    paragraph_gap_sec: float = Field(1.0, description="timeline 에서 문단(항목의 paragraph 번호가 바뀜) 사이 쉼(초)")
+    speed: float | None = Field(None, description="말 빠르기 0.8–1.25(음높이는 그대로)")
 
 
 def _error(status: int, message: str) -> JSONResponse:
@@ -91,6 +100,9 @@ def _tts_response(req: TTSRequest):
         replace=req.replace,
         use_lexicon=req.use_lexicon,
         ref_text=req.ref_text,
+        loudness=req.loudness,
+        sample_rate=req.sample_rate,
+        speed=req.speed,
     )
     if err is not None:
         return err
@@ -182,6 +194,8 @@ async def tts_compat(request: Request):
         req = TTSRequest(**{k: v for k, v in payload.items() if k in TTSRequest.model_fields})
     except Exception as exc:
         return _error(400, f"요청 형식 오류: {exc}")
+    if req.speed is not None:  # 일반 TTS 클라이언트 호환: 범위를 넘으면 오류 대신 가장 가까운 값으로
+        req.speed = min(1.25, max(0.8, float(req.speed)))
     from starlette.concurrency import run_in_threadpool
 
     return await run_in_threadpool(_tts_response, req)
@@ -207,7 +221,11 @@ def batch(req: BatchRequest):
         out_dir = temp_dir
     if not out_dir:
         out_dir = str(local_env.OUTPUTS / f"batch-{datetime.now().strftime('%Y%m%dT%H%M%S')}")
-    summary, err = _run(service.run_batch, items, out_dir, skip_existing=req.skip_existing)
+    summary, err = _run(
+        service.run_batch, items, out_dir, skip_existing=req.skip_existing, loudness=req.loudness,
+        sample_rate=req.sample_rate, prune=req.prune, timeline=req.timeline, gap_sec=req.gap_sec,
+        paragraph_gap_sec=req.paragraph_gap_sec, speed=req.speed,
+    )
     if err is not None:
         return err
     for entry in summary["items"]:
@@ -221,6 +239,9 @@ def batch(req: BatchRequest):
             if entry.get("ok") and entry.get("path"):
                 archive.write(entry["path"], arcname=Path(entry["path"]).name)
         archive.write(summary["manifest"], arcname="manifest.json")
+        for extra in ("narration_wav", "narration_srt", "narration_markers"):
+            if summary.get(extra):
+                archive.write(summary[extra], arcname=Path(summary[extra]).name)
     if temp_dir:
         shutil.rmtree(temp_dir, ignore_errors=True)
     headers = {"X-Succeeded": str(summary["succeeded"]), "X-Failed": str(summary["failed"])}
@@ -272,7 +293,28 @@ def register_reference(
         )
     if err is not None:
         return err
-    return {"ok": True, "style": style_obj.public_dict()}
+    return {"ok": True, "style": style_obj.public_dict(), "qc": style_obj.qc}
+
+
+@router.post("/api/references/check")
+def check_reference(
+    file: UploadFile = File(..., description="WAV 또는 M4A"),
+    script: str | None = Form(None, description="녹음에서 읽은 문장(주면 대본·녹음 맞춤도 검사)"),
+):
+    """등록하지 않고 녹음 상태만 검사한다(길이·대본 맞춤·잡음·찢어짐·끝 잘림·음질)."""
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in audio_prep.ALLOWED_SUFFIXES:
+        return _error(400, "WAV·M4A·MP3·AIFF·CAF·FLAC 파일만 받습니다.")
+    with tempfile.TemporaryDirectory(prefix="voicelab-check-") as tmp:
+        src = Path(tmp) / f"upload{suffix}"
+        with src.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        qc, err = _run(service.check_reference, src, script)
+    if err is not None:
+        return err
+    import audio_fx
+
+    return {"ok": not audio_fx.has_failure(qc), "qc": qc}
 
 
 @router.get("/api/lexicon")

@@ -22,9 +22,8 @@ import local_env
 ALLOWED_SUFFIXES = {".wav", ".m4a", ".mp3", ".aiff", ".aif", ".caf", ".flac", ".ogg", ".webm"}
 AFCONVERT = "/usr/bin/afconvert"
 # 음성 복제 안내의 권장 구간. 생성 코드가 이 길이로 자르지는 않는다.
-GUIDE_MIN_SECONDS = 5.0
-GUIDE_MAX_SECONDS = 15.0
 NEAR_SILENCE_RMS = 0.008
+QUIET_SPEECH_DBFS = -32.0  # 생성 때 말소리가 이보다 작은 참조 녹음은 키워서 넘긴다(작으면 결과에 잡음이 섞인다)
 
 
 class UserInputError(Exception):
@@ -40,6 +39,7 @@ class PreparedAudio:
     wav_sample_rate: int
     rms: float
     summary: str
+    qc: dict | None = None  # audio_fx.analyse_reference 결과(다듬기 전 원본 기준)
 
 
 def coerce_upload(file_obj: object) -> tuple[Path, str]:
@@ -76,8 +76,8 @@ def coerce_upload(file_obj: object) -> tuple[Path, str]:
 
 
 # ---------------------------------------------------------------- 디코딩
-def _read_wav_numpy(path: Path) -> tuple[np.ndarray, int]:
-    """PCM WAV → float32 모노. 지원하지 않는 WAV(부동소수 등)는 wave.Error."""
+def _read_wav_numpy(path: Path, keep_channels: bool = False) -> tuple[np.ndarray, int]:
+    """PCM WAV → float32 모노(keep_channels 면 (채널, 표본)). 지원하지 않는 WAV(부동소수 등)는 wave.Error."""
     with wave.open(str(path), "rb") as handle:
         channels = handle.getnchannels()
         width = handle.getsampwidth()
@@ -97,8 +97,9 @@ def _read_wav_numpy(path: Path) -> tuple[np.ndarray, int]:
     else:
         raise wave.Error(f"샘플 폭 {width}바이트 WAV는 읽지 못합니다.")
     if channels > 1:
-        data = data.reshape(-1, channels).mean(axis=1)
-    return data, rate
+        data = data.reshape(-1, channels)
+        return (data.T.copy(), rate) if keep_channels else (data.mean(axis=1), rate)
+    return (data.reshape(1, -1), rate) if keep_channels else (data, rate)
 
 
 def _read_with_av(path: Path) -> tuple[np.ndarray, int]:
@@ -133,6 +134,30 @@ def _read_with_afconvert(path: Path, tmp_wav: Path) -> tuple[np.ndarray, int]:
         return _read_wav_numpy(tmp_wav)
     finally:
         tmp_wav.unlink(missing_ok=True)
+
+
+def read_channels(path: Path | str) -> tuple[np.ndarray, int] | None:
+    """채널을 나누지 않고 읽는다((채널, 표본), 표본율). 못 읽으면 None(그때는 모노로만 검사)."""
+    path = Path(path)
+    try:
+        if path.suffix.lower() == ".wav":
+            return _read_wav_numpy(path, keep_channels=True)
+        import av
+
+        with av.open(str(path)) as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None:
+                return None
+            rate = int(stream.rate or stream.codec_context.sample_rate)
+            layout = stream.codec_context.layout.name if stream.codec_context.layout else "mono"
+            resampler = av.AudioResampler(format="fltp", layout=layout, rate=rate)
+            chunks = []
+            for frame in container.decode(stream):
+                chunks += [out.to_ndarray() for out in resampler.resample(frame)]
+            chunks += [out.to_ndarray() for out in resampler.resample(None)]
+        return (np.concatenate(chunks, axis=1).astype(np.float32), rate) if chunks else None
+    except Exception:
+        return None
 
 
 def decode_audio(path: Path | str) -> tuple[np.ndarray, int, str]:
@@ -191,32 +216,51 @@ def _wav_stats(path: Path) -> tuple[float, int, float]:
     return data.size / float(rate), rate, rms
 
 
-def _guidance(duration: float, rms: float) -> str:
-    notes: list[str] = [f"실제 길이: {duration:.2f}초"]
-    if rms < NEAR_SILENCE_RMS:
-        notes.append(f"경고: 무음에 가깝습니다 (RMS {rms:.4f}). 다시 녹음하기 전에는 등록하지 않습니다.")
-    elif duration < GUIDE_MIN_SECONDS or duration > GUIDE_MAX_SECONDS:
-        notes.append("깨끗한 말 5–15초를 권합니다. 너무 짧으면 화자 정보가 부족하고, 너무 길면 모델이 흔들릴 수 있습니다.")
-    else:
-        notes.append("길이는 권장 범위(5–15초) 안에 있습니다.")
-    return "\n".join(notes)
+def prepare_upload(file_obj: object, script: str | None = None, *, save: bool = True) -> PreparedAudio:
+    """녹음을 검사하고(다듬기 전 원본 기준) 다듬어 references/ 에 16-bit 모노 WAV 로 둔다.
 
+    save=False 면 검사만 한다(화면에서 녹음하자마자 미리 보여 줄 때).
+    """
+    import audio_fx
 
-def prepare_upload(file_obj: object) -> PreparedAudio:
     source, display_name = coerce_upload(file_obj)
     data, source_rate, method = decode_audio(source)
+    if data.size == 0:
+        raise UserInputError("변환된 음성에 샘플이 없습니다.")
+    data = np.asarray(data, dtype=np.float32).reshape(-1)
+    stereo_note: dict = {}
+    channels = read_channels(source)
+    if channels is not None and channels[0].shape[0] > 1 and channels[1] == source_rate:
+        picked, stereo_note = audio_fx.pick_channel(channels[0])
+        if picked.size == data.size:
+            data = picked.astype(np.float32)
+    qc = audio_fx.analyse_reference(data, source_rate, script, source_rate=source_rate)
+    qc["metrics"]["method"] = method
+    if stereo_note:
+        qc["metrics"]["stereo"] = stereo_note
+        clipped = [i for i, c in enumerate(stereo_note.get("clip_ratio_by_channel", [])) if c > audio_fx.CLIP_FAIL_RATIO]
+        if clipped and not any(c["item"] == "찢어짐" and c["level"] == "fail" for c in qc["checks"]):
+            qc["checks"].append({"level": "warn", "item": "찢어짐", "message": f"스테레오 {', '.join(str(i + 1) for i in clipped)}번 채널이 찢어졌습니다. 입력 음량을 낮춰 다시 녹음하세요."})
+        if stereo_note.get("used_channel") is not None:
+            qc["checks"].append({"level": "warn", "item": "스테레오", "message": f"{stereo_note['reason']} — {stereo_note['used_channel'] + 1}번 채널만 씁니다."})
+    if not save:
+        return PreparedAudio(
+            wav_path=Path(source), source_name=display_name, duration_sec=data.size / source_rate,
+            source_sample_rate=source_rate, wav_sample_rate=source_rate, rms=float(np.sqrt(np.mean(data**2))),
+            summary=audio_fx.qc_text(qc), qc=qc,
+        )
+    cleaned, notes = audio_fx.clean_reference(data, source_rate)
+    qc["metrics"].update(notes)
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(display_name).stem).strip("-") or "reference"
     dest = local_env.REFERENCES / f"{stamp}-{stem}.wav"
-    if data.size == 0:
-        raise UserInputError("변환된 음성에 샘플이 없습니다.")
-    write_pcm16(dest, data, source_rate)
+    write_pcm16(dest, cleaned, source_rate)
     duration, wav_rate, rms = _wav_stats(dest)
     summary = (
-        f"{_guidance(duration, rms)}\n"
-        f"샘플레이트: {wav_rate} Hz · RMS {rms:.4f} · 변환 방법 {method}\n"
-        f"파일: {display_name}\n"
-        f"저장 위치: {dest.resolve()}"
+        f"{audio_fx.qc_text(qc)}\n\n"
+        f"저장한 녹음: {duration:.2f}초 · {wav_rate} Hz · 변환 방법 {method}"
+        + (f" · 앞뒤 무음 {notes['trimmed_sec']}초 정리" if notes.get("trimmed_sec") else "")
+        + (f" · 음량 {notes['gain_db']:+.0f}dB" if notes.get("gain_db") else "")
     )
     return PreparedAudio(
         wav_path=dest.resolve(),
@@ -226,6 +270,7 @@ def prepare_upload(file_obj: object) -> PreparedAudio:
         wav_sample_rate=wav_rate,
         rms=rms,
         summary=summary,
+        qc=qc,
     )
 
 
@@ -256,3 +301,22 @@ def ensure_tail_silence(audio: np.ndarray, rate: int, min_sec: float) -> np.ndar
         audio[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
     return np.concatenate([audio, np.zeros(int(round((min_sec - tail_sec) * rate)), dtype=np.float32)])
 
+
+def loudness_fixed_reference(path: Path, tmp_dir: Path) -> Path:
+    """참조 녹음의 말소리가 너무 작으면 키운 복사본을 tmp_dir 에 만들어 돌려준다(아니면 원래 경로).
+
+    작은 녹음으로 만들면 결과에 잡음이 섞이고 Qwen3 말끝 보정이 자주 실패한다. 예전에 등록한 작은 녹음도
+    생성할 때마다 고쳐 쓴다(원본은 그대로 둔다). 보통 크기 녹음은 손대지 않아 결과가 그대로다.
+    """
+    import audio_fx
+
+    try:
+        data, rate = _read_wav_numpy(Path(path))
+    except Exception:
+        return path
+    fixed_audio, gain_db = audio_fx.level_speech(data, rate, audio_fx.SPEECH_TARGET_DBFS, only_if_below=QUIET_SPEECH_DBFS)
+    if gain_db <= 0:
+        return path
+    fixed = Path(tmp_dir) / "ref_loudness.wav"
+    write_pcm16(fixed, fixed_audio, rate)
+    return fixed

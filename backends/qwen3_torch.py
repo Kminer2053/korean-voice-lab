@@ -76,18 +76,16 @@ class Qwen3Torch(Backend):
 
         if self._model is None:
             self.load()
-        if ending.ENABLED:
-            audio, rate, stats = ending.generate(
-                lambda line, line_seed: self._generate_once(line, ref_wav, ref_text, line_seed), text, seed
-            )
-        else:
-            audio, rate = self._generate_once(text, ref_wav, ref_text, seed)
-            stats = {}
+        audio, rate, stats = ending.generate(
+            lambda line, line_seed, max_frames: self._generate_once(line, ref_wav, ref_text, line_seed, max_frames),
+            text,
+            seed,
+        )
         if self._device == "cuda":
             stats["peak_memory_bytes"] = int(torch.cuda.max_memory_allocated())
         return GenerationOutput(audio, rate, stats)
 
-    def _generate_once(self, text, ref_wav: Path, ref_text, seed) -> tuple[np.ndarray, int]:
+    def _generate_once(self, text, ref_wav: Path, ref_text, seed, max_frames: int) -> tuple[np.ndarray, int]:
         import torch
 
         if seed is not None:
@@ -97,5 +95,6 @@ class Qwen3Torch(Backend):
             language="Korean",
             ref_audio=str(ref_wav),
             ref_text=ref_text,
+            max_new_tokens=int(max_frames),  # 폭주 막기(ending.budget_frames)
         )
         return np.asarray(wavs[0], dtype=np.float32).reshape(-1), int(sample_rate)

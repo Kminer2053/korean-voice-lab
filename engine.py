@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import threading
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -19,7 +20,7 @@ import numpy as np
 
 import local_env
 import backends
-from audio_prep import ensure_tail_silence
+from audio_prep import ensure_tail_silence, loudness_fixed_reference
 from textnorm import spell_numbers
 import system_probe
 from backends import Backend, BackendUnavailable
@@ -33,6 +34,10 @@ _ACTIVE_ID: str | None = None
 # 결과 끝에 남길 최소 무음(초). 문장 사이 쉼을 고르게 한다.
 # VOICELAB_TAIL_SILENCE=0 이면 덧붙이지 않는다.
 TAIL_SILENCE_SEC = float(os.environ.get("VOICELAB_TAIL_SILENCE", "0.3"))
+# 선택 후처리(요청마다 바꿀 수도 있다). 비우거나 0 이면 끔.
+#  VOICELAB_TARGET_LUFS=-16 → 통합 음량을 -16 LUFS 로(트루 피크 -1 dBTP 아래), VOICELAB_SAMPLE_RATE=48000 → 48kHz 로 저장
+DEFAULT_LUFS = float(os.environ.get("VOICELAB_TARGET_LUFS") or 0) or None
+DEFAULT_RATE = int(os.environ.get("VOICELAB_SAMPLE_RATE") or 0) or None
 
 class ModelDisabled(RuntimeError):
     pass
@@ -51,6 +56,7 @@ class SynthesisReport:
     sample_rate: int
     output_samples: int
     peak_memory_bytes: int | None
+    stats: dict = field(default_factory=dict)  # 엔진별 측정값(Qwen3 말끝 보정 ending 등)
 
 
 def is_model_loaded() -> bool:
@@ -136,8 +142,15 @@ def _wav_duration(path: Path) -> tuple[float, int, int]:
 
 def _write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    clipped = np.clip(np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), -1.0, 1.0)
-    pcm = (clipped * 32767.0).astype("<i2")
+    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    if peak > 0.999:  # 잘라 내지 않고(찢어짐) 전체를 조금 줄인다
+        audio = audio * (0.999 / peak)
+    clipped = np.clip(audio, -1.0, 1.0)
+    # 16비트로 줄일 때 ±1 LSB 삼각 디더(작은 소리의 양자화 일그러짐 방지). 같은 입력이면 같은 결과가 나오게 고정 시드.
+    rng = np.random.default_rng(clipped.size)
+    dither = (rng.random(clipped.size) - rng.random(clipped.size)).astype(np.float32)
+    pcm = np.clip(np.round(clipped * 32767.0 + dither), -32768, 32767).astype("<i2")
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
@@ -174,6 +187,9 @@ def synthesize(
     seed: int | None = None,
     wait_sec: float | None = None,
     language: str = "ko",
+    loudness_lufs: float | None = None,
+    export_rate: int | None = None,
+    speed: float | None = None,
 ) -> SynthesisReport:
     """참조 녹음 하나(+ 대본)로 text 를 읽은 WAV 를 만든다.
 
@@ -206,11 +222,13 @@ def synthesize(
             backend, load_sec = _activate(engine_id)
             phase("generating")
             ref_duration, _rate, _frames = _wav_duration(ref_wav)
-            started = time.perf_counter()
-            out = backend.generate(
-                text=cleaned_text, ref_wav=ref_wav, ref_text=cleaned_ref, seed=seed, language=language
-            )
-            generate_sec = time.perf_counter() - started
+            with tempfile.TemporaryDirectory(prefix="voicelab-ref-") as tmp:
+                model_ref = loudness_fixed_reference(ref_wav, Path(tmp))  # 너무 작은 녹음은 키워서 넘긴다
+                started = time.perf_counter()
+                out = backend.generate(
+                    text=cleaned_text, ref_wav=model_ref, ref_text=cleaned_ref, seed=seed, language=language
+                )
+                generate_sec = time.perf_counter() - started
         except BackendUnavailable:
             raise
         except Exception:
@@ -219,15 +237,31 @@ def synthesize(
         audio = np.asarray(out.audio, dtype=np.float32).reshape(-1)
         if audio.size == 0:
             raise RuntimeError("모델 출력 샘플이 0개입니다.")
-        audio = ensure_tail_silence(audio, out.sample_rate, TAIL_SILENCE_SEC)
+        import audio_fx
+
+        rate = out.sample_rate
+        if speed and abs(float(speed) - 1.0) > 1e-3:
+            audio = audio_fx.change_tempo(audio, rate, float(speed))  # 음높이는 그대로, 빠르기만
+        audio = audio_fx.tidy_head(audio, rate)  # 앞 무음 0.1초로(클립 간격을 고르게)
+        audio = ensure_tail_silence(audio, rate, TAIL_SILENCE_SEC)
+        post: dict = {}
+        target_lufs = loudness_lufs if loudness_lufs is not None else DEFAULT_LUFS
+        if target_lufs:
+            audio, post = audio_fx.normalize_loudness(audio, rate, float(target_lufs))
+        target_rate = export_rate or DEFAULT_RATE
+        if target_rate and int(target_rate) != rate:
+            audio = audio_fx.resample(audio, rate, int(target_rate))
+            rate = int(target_rate)
+        if not post:
+            post = audio_fx.measure_output(audio, rate)
         if output_path is None:
             stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
             output_path = _unused_output(f"{_clip_token(clip_label or 'voice')}_{stamp}.wav")
         output_path = Path(output_path)
-        _write_wav(output_path, audio, out.sample_rate)
+        _write_wav(output_path, audio, rate)
         output_duration, written_rate, output_samples = _wav_duration(output_path)
-        if written_rate != out.sample_rate:
-            raise RuntimeError("저장한 WAV의 샘플레이트가 모델 출력과 다릅니다.")
+        if written_rate != rate:
+            raise RuntimeError("저장한 WAV의 샘플레이트가 의도한 값과 다릅니다.")
         peak = out.stats.get("peak_memory_bytes")
         return SynthesisReport(
             engine_id=engine_id,
@@ -238,9 +272,10 @@ def synthesize(
             output_duration_sec=output_duration,
             load_sec=load_sec,
             generate_sec=generate_sec,
-            sample_rate=out.sample_rate,
+            sample_rate=rate,
             output_samples=output_samples,
             peak_memory_bytes=int(peak) if peak is not None else None,
+            stats={**{k: v for k, v in out.stats.items() if k != "peak_memory_bytes"}, "audio": post},
         )
     finally:
         _LOCK.release()

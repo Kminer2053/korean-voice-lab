@@ -7,3 +7,5 @@ huggingface_hub>=0.30
 mcp==2.3.0
 # M4A·MP3 등 녹음 변환(ffmpeg 내장 휠)
 av>=14
+# 음량(LUFS)·표본율 변환·녹음 다듬기
+scipy>=1.11
