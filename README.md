@@ -8,8 +8,8 @@ TTS 모델을 골라 쓸 수 있고, 모델마다 그 컴퓨터에서 가장 빠
 ## 무엇을 하나요
 
 - **화면 한 장으로 끝까지**: 말투 고르기 → 문장 적기 → 만들기 → 바로 듣고 WAV 받기. 결과마다 seed가 남아 마음에 든 결과를 다시 얻을 수 있습니다.
-- **영상 내레이션 작업용**: 대본을 붙여 넣고 "줄마다·문장마다"를 고르면 `001_문장.wav` 순서대로 파일이 생기고, 이어 붙인 WAV·자막(SRT)·zip을 한 번에 받습니다. 바뀐 줄만 다시 만들고, 마음에 안 드는 번호만 다른 버전으로 다시 만듭니다. 선택하면 음량을 영상 기준(-16 LUFS)으로, 표본율을 48kHz로 맞춥니다.
-- **녹음 검사**: 등록 전에 대본과 녹음이 맞는지, 잡음·찢어짐·길이·끝 잘림·좁은 대역(블루투스 마이크)을 검사해 이유를 알려 줍니다. 대본과 녹음이 어긋나면 모델이 문장을 끝맺지 못하는 일이 생기기 때문입니다.
+- **영상 내레이션 작업용**: 대본을 붙여 넣고 "줄마다·문장마다"를 고르면 `001_문장.wav` 순서대로 파일이 생기고, 이어 붙인 WAV·자막(SRT)·편집 마커(CSV)·zip을 한 번에 받습니다. 빈 줄로 나눈 문단 사이는 더 길게 쉽니다. 바뀐 줄만 다시 만들고, 마음에 안 드는 번호만 다른 버전으로 다시 만들며, 이전 프로젝트를 다시 불러올 수 있습니다. 선택하면 음량을 영상 기준(-16 LUFS)으로, 표본율을 48kHz로, 말 빠르기를 0.8–1.25배로(음높이는 그대로) 맞춥니다.
+- **녹음 검사와 고음질 녹음**: 등록 전에 대본과 녹음이 맞는지, 잡음·찢어짐·길이·끝 잘림·좁은 대역(블루투스 마이크)·방 울림·전원 웅 소리·스테레오 채널을 검사해 이유를 알려 줍니다. 대본과 녹음이 어긋나면 모델이 문장을 끝맺지 못하는 일이 생기기 때문입니다. 화면의 **고음질로 녹음**은 브라우저의 잡음 제거·에코 제거·자동 음량을 끄고 압축 없이 녹음하고, 등록한 뒤 **시험 문장**으로 바로 확인합니다.
 - **모델을 골라 쓰기**: Qwen3-TTS(중국 Alibaba, Apache-2.0)와 Chatterbox Multilingual v3(미국 Resemble AI, MIT) 중에서 고릅니다. 개발 주체 국가와 라이선스는 화면과 [docs/ENGINES.md](docs/ENGINES.md)에 있습니다.
 - **말투별 참조 녹음**: 기본·대화·안내·기쁨 네 가지이고 직접 추가할 수 있습니다. 한 번 녹음하면 모든 모델이 같이 씁니다.
 - **대사 일괄 생성**: 문장 목록(JSON·TXT)을 넣으면 대사마다 WAV 하나와 `manifest.json`이 나옵니다. 이미 만든 대사는 다시 만들지 않습니다.
@@ -105,8 +105,10 @@ claude mcp add voicelab -- "$PWD/.venv/bin/python" "$PWD/mcp_server.py"
 
 # 명령줄: 대사 목록 → WAV 여러 개 + manifest.json (모델 지정은 -e)
 .venv/bin/python voicelab_cli.py batch examples/lines.json -o ~/Desktop/narration -s guide -e chatterbox
-# 영상용: 음량 -16 LUFS, 48kHz, 이어 붙인 WAV와 자막 SRT까지
+# 영상용: 음량 -16 LUFS, 48kHz, 이어 붙인 WAV·자막 SRT·마커 CSV까지(TXT의 빈 줄 = 문단, 1초 쉼)
 .venv/bin/python voicelab_cli.py batch script.txt -o ~/Desktop/narration -s guide --loudness -16 --sample-rate 48000 --timeline
+# 조금 빠르게(음높이는 그대로)
+.venv/bin/python voicelab_cli.py say "화면 전환에 맞춰 조금 빠르게 읽습니다." -s guide --speed 1.1 -o fast.wav
 
 # HTTP
 curl -s -X POST http://127.0.0.1:7860/api/tts -H 'Content-Type: application/json' \

@@ -172,6 +172,7 @@ def synthesize(
     wait_sec: float | None = None,
     loudness: float | None = None,
     sample_rate: int | None = None,
+    speed: float | None = None,
 ) -> Result:
     """한 문장(또는 한 덩어리)을 고른 말투로 읽어 WAV 하나를 만든다.
 
@@ -210,6 +211,10 @@ def synthesize(
         seed = secrets.randbelow(2**31 - 1)  # 무작위지만 기록해 두어 같은 결과를 다시 얻을 수 있게
     if sample_rate is not None and int(sample_rate) not in (16000, 22050, 24000, 44100, 48000):
         raise UserInputError("sample_rate 는 16000, 22050, 24000, 44100, 48000 중 하나여야 합니다.")
+    if speed is not None and not 0.8 <= float(speed) <= 1.25:
+        raise UserInputError("speed(말 빠르기)는 0.8 ~ 1.25 사이여야 합니다(1 = 그대로, 1.1 = 10% 빠르게).")
+    if speed is not None and abs(float(speed) - 1.0) < 1e-3:
+        speed = None
     if loudness is not None and not -40 <= float(loudness) <= -5:
         raise UserInputError("loudness 는 -40 ~ -5 LUFS 사이여야 합니다(영상은 보통 -16, 유튜브 -14).")
 
@@ -231,6 +236,7 @@ def synthesize(
             wait_sec=wait_sec,
             loudness_lufs=loudness,
             export_rate=sample_rate,
+            speed=speed,
         )
     except Exception as exc:
         _set_phase("error", str(exc))
@@ -293,6 +299,7 @@ class BatchItem:
     seed: int | None = None
     engine: str | None = None
     replace: dict[str, str] = field(default_factory=dict)
+    paragraph: int | None = None  # 같은 번호끼리 한 문단(timeline 에서 문단 사이는 더 길게 쉰다)
 
 
 def parse_items(data: Any, default_style: str | None = None) -> list[BatchItem]:
@@ -334,6 +341,7 @@ def parse_items(data: Any, default_style: str | None = None) -> list[BatchItem]:
                 seed=entry.get("seed"),
                 engine=entry.get("engine") or common_engine,
                 replace=merged,
+                paragraph=int(entry["paragraph"]) if str(entry.get("paragraph", "")).strip().lstrip("-").isdigit() else None,
             )
         )
     if not items:
@@ -388,6 +396,8 @@ def run_batch(
     prune: bool = False,
     timeline: bool = False,
     gap_sec: float = 0.4,
+    paragraph_gap_sec: float = 1.0,
+    speed: float | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """문장마다 WAV 하나. out_dir/manifest.json 에 결과를 남긴다.
@@ -396,7 +406,8 @@ def run_batch(
       out_dir/.voicelab-cache 에서 찾아 쓴다. 다른 버전(seed)으로 다시 만들어도 이전 것은 그 폴더에 남는다.
     - 한 문장이 실패해도 나머지는 계속 만든다.
     - prune: 이번 목록에 없는 예전 파일은 _stale/ 로 옮기고 manifest 에서 뺀다(지우지 않음).
-    - timeline: 순서대로 이어 붙인 narration.wav 와 자막 narration.srt 를 만들고, 항목마다 start_sec·end_sec 를 넣는다.
+    - timeline: 순서대로 이어 붙인 narration.wav, 자막 narration.srt, 편집 프로그램 마커 narration_markers.csv 를 만들고
+      항목마다 start_sec·end_sec 를 넣는다. 문장 사이 gap_sec, 문단(paragraph 번호가 바뀜) 사이 paragraph_gap_sec 만큼 쉰다.
     - should_stop() 이 True 가 되면 다음 문장부터 멈춘다.
     """
     items = list(items)
@@ -411,7 +422,8 @@ def run_batch(
             manifest = loaded.get("items", {}) if isinstance(loaded, dict) else {}
         except (OSError, json.JSONDecodeError):
             manifest = {}
-    options = {"loudness": loudness, "sample_rate": sample_rate}
+    options = {"loudness": loudness, "sample_rate": sample_rate,
+               "speed": None if speed is None or abs(float(speed) - 1.0) < 1e-3 else float(speed)}
     results: list[dict[str, Any]] = []
     started = time.perf_counter()
     used: set[str] = set()
@@ -467,6 +479,7 @@ def run_batch(
                     item_id=key,
                     loudness=loudness,
                     sample_rate=sample_rate,
+                    speed=speed,
                 )
                 entry = result.to_dict()
                 entry["id"] = key
@@ -480,6 +493,10 @@ def run_batch(
             save_manifest()
         except Exception as exc:
             entry = {"ok": False, "id": key, "text": item.text, "error": str(exc)}
+        if item.paragraph is not None:
+            entry["paragraph"] = item.paragraph
+            if key in manifest and entry.get("ok"):
+                manifest[key]["paragraph"] = item.paragraph
         results.append(entry)
         if on_item is not None:
             on_item(index, len(items), entry)
@@ -492,9 +509,13 @@ def run_batch(
                 (folder / "_stale").mkdir(exist_ok=True)
                 old.replace(folder / "_stale" / old.name)
             manifest.pop(k, None)
-    extras: dict[str, str] = {}
+    extras: dict[str, Any] = {}
+    mixed = {str(r.get("engine")) for r in results if r.get("ok") and r.get("engine")}  # 재사용한 항목 포함
+    if len(mixed) > 1:
+        extras["warning"] = (f"이번 결과에 여러 엔진이 섞여 있습니다({', '.join(sorted(mixed))}). "
+                             "한 영상 안에서는 목소리 느낌이 달라지니 한 엔진으로 다시 만드세요.")
     if timeline:
-        extras = _write_timeline(folder, results, gap_sec)
+        extras.update(_write_timeline(folder, results, gap_sec, paragraph_gap_sec))
         for entry in results:
             if entry.get("ok") and entry["id"] in manifest:
                 manifest[entry["id"]].update({k: entry[k] for k in ("start_sec", "end_sec") if k in entry})
@@ -529,8 +550,11 @@ def _srt_time(sec: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float) -> dict[str, str]:
-    """성공한 항목을 순서대로 이어 붙인 narration.wav 와 자막 narration.srt. 항목에 start_sec·end_sec 를 넣는다."""
+def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float, paragraph_gap_sec: float = 1.0) -> dict[str, str]:
+    """성공한 항목을 순서대로 이어 붙인 narration.wav, 자막 narration.srt, 마커 narration_markers.csv.
+
+    항목에 start_sec·end_sec 를 넣는다. paragraph 번호가 바뀌는 곳은 paragraph_gap_sec 만큼 쉰다.
+    """
     import wave
 
     import numpy as np
@@ -542,6 +566,8 @@ def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float)
     rate = None
     cursor = 0.0
     number = 0
+    markers = ["Name,Start,End,Duration,Text"]
+    last_paragraph = None
     for entry in results:
         if not entry.get("ok"):
             continue
@@ -553,8 +579,10 @@ def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float)
         elif this_rate != rate:
             audio = audio_fx.resample(audio, this_rate, rate)
         if pieces:
-            pieces.append(np.zeros(int(gap_sec * rate), dtype=np.float32))
-            cursor += gap_sec
+            pause = paragraph_gap_sec if entry.get("paragraph") != last_paragraph else gap_sec
+            pieces.append(np.zeros(int(pause * rate), dtype=np.float32))
+            cursor += pause
+        last_paragraph = entry.get("paragraph")
         duration = audio.size / rate
         levels = audio_fx.frame_db(audio, rate)
         mask, _floor, _speech = audio_fx.speech_mask(levels)
@@ -564,6 +592,9 @@ def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float)
         entry["end_sec"] = round(cursor + duration, 3)
         number += 1
         lines += [str(number), f"{_srt_time(cursor)} --> {_srt_time(cursor + min(duration, speech_end + 0.2))}", entry.get("text", ""), ""]
+        text_cell = '"' + entry.get("text", "").replace('"', '""') + '"'
+        markers.append(f"{entry.get('id', number)},{_srt_time(cursor).replace(',', '.')},{_srt_time(cursor + duration).replace(',', '.')},"
+                       f"{duration:.3f},{text_cell}")
         pieces.append(audio)
         cursor += duration
     if rate is None:
@@ -572,7 +603,9 @@ def _write_timeline(folder: Path, results: list[dict[str, Any]], gap_sec: float)
     srt_path = folder / "narration.srt"
     audio_prep.write_pcm16(wav_path, np.concatenate(pieces), rate)
     srt_path.write_text("\n".join(lines), encoding="utf-8")
-    return {"narration_wav": str(wav_path), "narration_srt": str(srt_path)}
+    markers_path = folder / "narration_markers.csv"
+    markers_path.write_text("\ufeff" + "\n".join(markers) + "\n", encoding="utf-8")  # BOM: 엑셀·편집기에서 한글이 깨지지 않게
+    return {"narration_wav": str(wav_path), "narration_srt": str(srt_path), "narration_markers": str(markers_path)}
 
 
 def register_reference(

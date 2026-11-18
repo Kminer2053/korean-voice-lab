@@ -114,6 +114,64 @@ def _high_band_db(audio: np.ndarray, rate: int, mask: np.ndarray) -> float:
     return float(10 * np.log10(high / spectrum.sum() + 1e-12))
 
 
+def _reverb_t60(levels: np.ndarray, speech_db: float, floor_db: float) -> float | None:
+    """말이 멈추고 0.25초 넘게 쉬는 곳의 꼬리가 줄어드는 기울기로 울림 시간(T60, 초)을 어림한다.
+
+    마른 녹음은 말이 멈추면 곧바로 잡음 바닥까지 떨어진다. 울리는 방은 소리가 천천히 잦아든다.
+    말소리 수준 -10dB 지점부터 잡음 바닥 +5dB 까지(최대 0.6초)의 기울기를 쓴다. 쉼이 없으면 None.
+    """
+    frames_per_sec = 1.0 / HOP_SEC
+    quiet_len = int(0.25 * frames_per_sec)
+    loud = levels >= speech_db - 10
+    estimates: list[float] = []
+    i = 0
+    n = levels.size
+    while i < n - quiet_len:
+        if loud[i] and not loud[i + 1 : i + 1 + quiet_len].any() and levels[i + quiet_len] < levels[i] - 8:
+            stop = i + 1
+            limit = min(n, i + int(0.6 * frames_per_sec))
+            while stop < limit and levels[stop] > floor_db + 5:
+                stop += 1
+            part = levels[i:stop]
+            if part.size >= 4 and part[0] - part[-1] >= 15:
+                slope = np.polyfit(np.arange(part.size) / frames_per_sec, part, 1)[0]
+                if slope < -1:
+                    estimates.append(60.0 / -slope)
+            i += quiet_len
+            continue
+        i += 1
+    if not estimates:
+        return None
+    return float(np.median(estimates))
+
+
+def _hum(audio: np.ndarray, rate: int, levels: np.ndarray, floor_db: float) -> int | None:
+    """쉼 구간에서 전원 험(50·60Hz와 배음)이 이웃보다 15dB 이상 크면 그 주파수."""
+    hop = int(rate * HOP_SEC)
+    quiet = np.flatnonzero(levels < floor_db + 6)
+    if quiet.size < 30 or floor_db < -85:
+        return None
+    win = 1 << int(np.ceil(np.log2(rate * 0.25)))  # 4Hz 안팎 해상도
+    spectrum = np.zeros(win // 2 + 1)
+    used = 0
+    for i in quiet[:: max(1, quiet.size // 40)]:
+        chunk = audio[i * hop : i * hop + win]
+        if chunk.size == win:
+            spectrum += np.abs(np.fft.rfft(chunk * np.hanning(win))) ** 2
+            used += 1
+    if used < 5:
+        return None
+    freqs = np.fft.rfftfreq(win, 1 / rate)
+    power_db = 10 * np.log10(spectrum + 1e-20)
+    for base in (50, 60):
+        for f in (base, 2 * base, 3 * base):
+            k = int(np.argmin(np.abs(freqs - f)))
+            neighbours = np.r_[power_db[max(0, k - 12) : k - 3], power_db[k + 4 : k + 13]]
+            if neighbours.size and power_db[k - 1 : k + 2].max() - np.median(neighbours) > 15:
+                return base
+    return None
+
+
 def analyse_reference(audio: np.ndarray, rate: int, script: str | None = None, source_rate: int | None = None) -> dict:
     """참조 녹음 검사. {"metrics": {...}, "checks": [{"level": ok|warn|fail, "item", "message"}]}."""
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -203,7 +261,45 @@ def analyse_reference(audio: np.ndarray, rate: int, script: str | None = None, s
         add("warn", "음질", "고음이 잘린 좁은 대역 녹음입니다(블루투스 이어폰 마이크·전화). 기기 내장 마이크나 유선 마이크를 쓰세요.")
     if abs(metrics["dc_offset"]) > 0.005:
         add("warn", "직류 치우침", "녹음 신호가 한쪽으로 치우쳐 있어 등록할 때 바로잡습니다.")
+
+    # 울림·전원 험
+    t60 = _reverb_t60(levels, speech_db, max(floor_db, FLOOR_DB))
+    if t60 is not None:
+        metrics["reverb_t60_sec"] = round(t60, 2)
+        if t60 > 0.8:
+            add("warn", "울림", f"방 울림이 큽니다(잔향 약 {t60:.1f}초). 결과에도 울림이 실립니다. 커튼·옷장 근처나 작은 방에서 다시 녹음하세요.")
+        elif t60 > 0.5:
+            add("warn", "울림", f"방 울림이 조금 있습니다(잔향 약 {t60:.1f}초). 마이크에 조금 더 가까이 대면 줄어듭니다.")
+    hum = _hum(audio, rate, levels, floor_db)
+    if hum:
+        metrics["hum_hz"] = hum
+        add("warn", "웅 소리", f"쉼 구간에 {hum}Hz 전원 웅 소리가 섞여 있습니다. 충전기·전원선을 빼거나 노트북 배터리로 녹음해 보세요.")
     return {"metrics": metrics, "checks": checks}
+
+
+def pick_channel(channels: np.ndarray) -> tuple[np.ndarray, dict]:
+    """스테레오 녹음을 모노로. 한쪽이 비었거나(10dB 이상 약함) 두 채널이 딴판이면(위상 반전 등) 강한 쪽만 쓴다.
+
+    channels: (채널 수, 표본 수). 돌려주는 값: (모노, 기록). 채널마다 찢어짐도 따로 잰다.
+    """
+    channels = np.asarray(channels, dtype=np.float32)
+    if channels.ndim == 1 or channels.shape[0] == 1:
+        return channels.reshape(-1), {}
+    rms = np.sqrt(np.mean(channels**2, axis=1)) + 1e-12
+    strong = int(np.argmax(rms))
+    note: dict = {"channels": int(channels.shape[0])}
+    clip = [float(np.mean(np.abs(c) >= 0.999)) for c in channels]
+    note["clip_ratio_by_channel"] = [round(c, 5) for c in clip]
+    weak_db = 20 * np.log10(rms.min() / rms.max())
+    if channels.shape[1] > 1 and rms.min() > 1e-6:
+        corr = float(np.corrcoef(channels[0], channels[1])[0, 1])
+    else:
+        corr = 1.0
+    if weak_db < -10 or corr < 0.3:
+        note["used_channel"] = strong
+        note["reason"] = "한쪽 채널이 비었음" if weak_db < -10 else "두 채널이 서로 달라 강한 쪽만 씀"
+        return channels[strong].copy(), note
+    return channels.mean(axis=0), note
 
 
 def has_failure(qc: dict) -> bool:
@@ -212,7 +308,7 @@ def has_failure(qc: dict) -> bool:
 
 def qc_text(qc: dict) -> str:
     marks = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
-    return "\n".join(f"{marks[c['level']]} **{c['item']}** — {c['message']}" for c in qc.get("checks", []))
+    return "\n".join(f"- {marks[c['level']]} **{c['item']}** — {c['message']}" for c in qc.get("checks", []))
 
 
 def clean_reference(audio: np.ndarray, rate: int) -> tuple[np.ndarray, dict]:
@@ -378,6 +474,40 @@ def normalize_loudness(audio: np.ndarray, rate: int, target_lufs: float, ceiling
     out = out.astype(np.float32)
     return out, {"lufs": round(loudness_lufs(out, rate), 1), "gain_db": round(target_lufs - before, 1),
                  "true_peak_dbtp": round(true_peak_db(out, rate), 1)}
+
+
+SPEED_RANGE = (0.8, 1.25)
+
+
+def change_tempo(audio: np.ndarray, rate: int, speed: float) -> np.ndarray:
+    """음높이는 그대로 두고 말 빠르기만 바꾼다(ffmpeg atempo, PyAV 내장). speed 1.1 = 10% 빠르게."""
+    speed = float(speed)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if abs(speed - 1.0) < 1e-3 or not audio.size:
+        return audio
+    import av
+    from av.filter import Graph
+
+    graph = Graph()
+    src = graph.add_abuffer(format="flt", sample_rate=rate, layout="mono")
+    tempo = graph.add("atempo", f"{speed:.4f}")
+    sink = graph.add("abuffersink")
+    src.link_to(tempo)
+    tempo.link_to(sink)
+    graph.configure()
+    frame = av.AudioFrame.from_ndarray(audio.reshape(1, -1), format="flt", layout="mono")
+    frame.sample_rate = rate
+    frame.pts = 0
+    graph.push(frame)
+    graph.push(None)
+    pieces: list[np.ndarray] = []
+    while True:
+        try:
+            out = graph.pull()
+        except Exception:  # 끝(EOF) 또는 더 나올 것이 없음
+            break
+        pieces.append(out.to_ndarray().reshape(-1))
+    return np.concatenate(pieces).astype(np.float32) if pieces else audio
 
 
 def resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:

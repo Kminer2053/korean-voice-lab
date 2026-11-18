@@ -39,7 +39,8 @@ Cursor·Claude Desktop(`mcpServers`)이나 Codex(`~/.codex/config.toml`)의 설�
 - 결과는 `out/voice/<id>.wav`와 `out/voice/manifest.json`입니다. 표준 출력 JSON의 `items[].duration_sec`로 영상 타이밍을 잡으면 됩니다.
 - 같은 문장·말투로 이미 만든 파일은 재사용합니다(`cached: true`). 다시 만들려면 `--force`를 붙입니다.
 - 한 항목이 실패해도 나머지는 계속 만듭니다. 종료 코드 1과 `items[].error`를 확인하세요.
-- 영상용이면 `--loudness -16 --sample-rate 48000 --timeline`을 붙입니다. 문장마다 음량이 고르고(-16 LUFS), 48kHz로 저장되며, 이어 붙인 `narration.wav`와 자막 `narration.srt`가 함께 나옵니다(항목마다 `start_sec`·`end_sec`).
+- 영상용이면 `--loudness -16 --sample-rate 48000 --timeline`을 붙입니다. 문장마다 음량이 고르고(-16 LUFS), 48kHz로 저장되며, 이어 붙인 `narration.wav`, 자막 `narration.srt`, 편집 마커 `narration_markers.csv`가 함께 나옵니다(항목마다 `start_sec`·`end_sec`). TXT의 빈 줄(JSON은 항목의 `paragraph` 번호)은 문단으로 보고 1초 쉽니다(`--paragraph-gap`).
+- 화면 전환에 맞춰 빠르기를 바꿔야 하면 `--speed 0.8–1.25`(음높이는 그대로)를 씁니다.
 - 대본 중간에 줄을 넣어 번호가 밀려도 바뀐 줄만 새로 만듭니다(`<out>/.voicelab-cache`). 지운 줄의 옛 파일까지 치우려면 `--prune`(지우지 않고 `_stale/`로 옮김).
 - 결과마다 `seed`가 남습니다. 마음에 안 드는 줄은 그 항목에 다른 `seed`를 주어 다시 만듭니다. `warning`이 있는 항목은 사람이 들어 보게 알려 주세요.
 

@@ -76,8 +76,8 @@ def coerce_upload(file_obj: object) -> tuple[Path, str]:
 
 
 # ---------------------------------------------------------------- 디코딩
-def _read_wav_numpy(path: Path) -> tuple[np.ndarray, int]:
-    """PCM WAV → float32 모노. 지원하지 않는 WAV(부동소수 등)는 wave.Error."""
+def _read_wav_numpy(path: Path, keep_channels: bool = False) -> tuple[np.ndarray, int]:
+    """PCM WAV → float32 모노(keep_channels 면 (채널, 표본)). 지원하지 않는 WAV(부동소수 등)는 wave.Error."""
     with wave.open(str(path), "rb") as handle:
         channels = handle.getnchannels()
         width = handle.getsampwidth()
@@ -97,8 +97,9 @@ def _read_wav_numpy(path: Path) -> tuple[np.ndarray, int]:
     else:
         raise wave.Error(f"샘플 폭 {width}바이트 WAV는 읽지 못합니다.")
     if channels > 1:
-        data = data.reshape(-1, channels).mean(axis=1)
-    return data, rate
+        data = data.reshape(-1, channels)
+        return (data.T.copy(), rate) if keep_channels else (data.mean(axis=1), rate)
+    return (data.reshape(1, -1), rate) if keep_channels else (data, rate)
 
 
 def _read_with_av(path: Path) -> tuple[np.ndarray, int]:
@@ -133,6 +134,30 @@ def _read_with_afconvert(path: Path, tmp_wav: Path) -> tuple[np.ndarray, int]:
         return _read_wav_numpy(tmp_wav)
     finally:
         tmp_wav.unlink(missing_ok=True)
+
+
+def read_channels(path: Path | str) -> tuple[np.ndarray, int] | None:
+    """채널을 나누지 않고 읽는다((채널, 표본), 표본율). 못 읽으면 None(그때는 모노로만 검사)."""
+    path = Path(path)
+    try:
+        if path.suffix.lower() == ".wav":
+            return _read_wav_numpy(path, keep_channels=True)
+        import av
+
+        with av.open(str(path)) as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None:
+                return None
+            rate = int(stream.rate or stream.codec_context.sample_rate)
+            layout = stream.codec_context.layout.name if stream.codec_context.layout else "mono"
+            resampler = av.AudioResampler(format="fltp", layout=layout, rate=rate)
+            chunks = []
+            for frame in container.decode(stream):
+                chunks += [out.to_ndarray() for out in resampler.resample(frame)]
+            chunks += [out.to_ndarray() for out in resampler.resample(None)]
+        return (np.concatenate(chunks, axis=1).astype(np.float32), rate) if chunks else None
+    except Exception:
+        return None
 
 
 def decode_audio(path: Path | str) -> tuple[np.ndarray, int, str]:
@@ -203,8 +228,21 @@ def prepare_upload(file_obj: object, script: str | None = None, *, save: bool = 
     if data.size == 0:
         raise UserInputError("변환된 음성에 샘플이 없습니다.")
     data = np.asarray(data, dtype=np.float32).reshape(-1)
+    stereo_note: dict = {}
+    channels = read_channels(source)
+    if channels is not None and channels[0].shape[0] > 1 and channels[1] == source_rate:
+        picked, stereo_note = audio_fx.pick_channel(channels[0])
+        if picked.size == data.size:
+            data = picked.astype(np.float32)
     qc = audio_fx.analyse_reference(data, source_rate, script, source_rate=source_rate)
     qc["metrics"]["method"] = method
+    if stereo_note:
+        qc["metrics"]["stereo"] = stereo_note
+        clipped = [i for i, c in enumerate(stereo_note.get("clip_ratio_by_channel", [])) if c > audio_fx.CLIP_FAIL_RATIO]
+        if clipped and not any(c["item"] == "찢어짐" and c["level"] == "fail" for c in qc["checks"]):
+            qc["checks"].append({"level": "warn", "item": "찢어짐", "message": f"스테레오 {', '.join(str(i + 1) for i in clipped)}번 채널이 찢어졌습니다. 입력 음량을 낮춰 다시 녹음하세요."})
+        if stereo_note.get("used_channel") is not None:
+            qc["checks"].append({"level": "warn", "item": "스테레오", "message": f"{stereo_note['reason']} — {stereo_note['used_channel'] + 1}번 채널만 씁니다."})
     if not save:
         return PreparedAudio(
             wav_path=Path(source), source_name=display_name, duration_sec=data.size / source_rate,

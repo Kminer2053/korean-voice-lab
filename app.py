@@ -197,19 +197,29 @@ def register_choices() -> list[tuple[str, str]]:
     return items
 
 
-def split_text(text: str, mode: str) -> list[str]:
-    """만들 조각: none(한 덩어리) · line(줄마다) · sentence(문장마다)."""
+def split_pieces(text: str, mode: str) -> list[tuple[str, int]]:
+    """만들 조각과 문단 번호: none(한 덩어리) · line(줄마다) · sentence(문장마다). 빈 줄은 문단 경계."""
     raw = (text or "").strip()
     if not raw:
         return []
-    if mode == "line":
-        return [line.strip() for line in raw.splitlines() if line.strip()]
-    if mode == "sentence":
-        pieces: list[str] = []
-        for line in raw.splitlines():
-            pieces += [p.strip() for p in re.split(r"(?<=[.?!…。])\s+", line) if p.strip()]
-        return pieces
-    return [raw]
+    if mode == "none":
+        return [(raw, 1)]
+    pieces: list[tuple[str, int]] = []
+    paragraph = 1
+    for line in raw.splitlines():
+        if not line.strip():
+            if pieces and pieces[-1][1] == paragraph:
+                paragraph += 1
+            continue
+        if mode == "sentence":
+            pieces += [(p.strip(), paragraph) for p in re.split(r"(?<=[.?!…。])\s+", line) if p.strip()]
+        else:
+            pieces.append((line.strip(), paragraph))
+    return pieces
+
+
+def split_text(text: str, mode: str) -> list[str]:
+    return [piece for piece, _paragraph in split_pieces(text, mode)]
 
 
 def render_readiness(text: str, mode: str, style_id: str | None, consent: bool) -> str:
@@ -224,7 +234,8 @@ def render_readiness(text: str, mode: str, style_id: str | None, consent: bool) 
         if mode == "none":
             parts.append(f"✓ 문장 {size} → 파일 1개" + (" (줄바꿈은 쉼으로 읽음)" if lines > 1 else ""))
         else:
-            parts.append(f"✓ 문장 {size} → 파일 {len(pieces)}개")
+            paragraphs = len({n for _t, n in split_pieces(text, mode)})
+            parts.append(f"✓ 문장 {size} → 파일 {len(pieces)}개" + (f" · 문단 {paragraphs}개" if paragraphs > 1 else ""))
         longest = max((len(p) for p in pieces), default=0)
         if longest > service.MAX_TEXT_CHARS:
             parts.append(f"✗ 한 파일에 {longest}자 — {service.MAX_TEXT_CHARS}자 이하로 나누세요")
@@ -288,10 +299,53 @@ def _zip_project(folder: Path, summary: dict) -> Path:
             if entry.get("ok") and entry.get("path"):
                 archive.write(entry["path"], arcname=Path(entry["path"]).name)
         archive.write(summary["manifest"], arcname="manifest.json")
-        for extra in ("narration_wav", "narration_srt"):
+        for extra in ("narration_wav", "narration_srt", "narration_markers"):
             if summary.get(extra):
                 archive.write(summary[extra], arcname=Path(summary[extra]).name)
     return target
+
+
+def list_projects() -> list[str]:
+    root = local_env.OUTPUTS / "projects"
+    if not root.is_dir():
+        return []
+    folders = [p for p in root.iterdir() if p.is_dir() and (p / "manifest.json").is_file()]
+    return [p.name for p in sorted(folders, key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def load_project(name: str):
+    """이전 프로젝트 폴더의 결과를 대본 순서대로 다시 보여 준다(생성하지 않음)."""
+    folder = local_env.OUTPUTS / "projects" / (name or "")
+    manifest_path = folder / "manifest.json"
+    if not name or not manifest_path.is_file():
+        return {COMPONENTS["gen_status"]: "불러올 프로젝트를 고르세요."}
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    items = data.get("items", {})
+    order = data.get("order") or sorted(items)
+    rows, entries = [], []
+    for number, key in enumerate(order, start=1):
+        entry = dict(items.get(key) or {"ok": False, "text": key, "error": "기록 없음"})
+        wav = folder / f"{key}.wav"
+        entry.setdefault("ok", wav.is_file())
+        if wav.is_file():
+            entry.update(path=str(wav), file=wav.name, url=_file_url(wav))
+        rows.append(_result_row(entry, number))
+        entries.append(entry)
+    summary = {"items": [e for e in entries if e.get("path")], "manifest": str(manifest_path)}
+    for extra, fname in (("narration_wav", "narration.wav"), ("narration_srt", "narration.srt"), ("narration_markers", "narration_markers.csv")):
+        if (folder / fname).is_file():
+            summary[extra] = str(folder / fname)
+    zip_path = _zip_project(folder, summary)
+    files = [str(zip_path)] + [summary[k] for k in ("narration_wav", "narration_srt", "narration_markers") if summary.get(k)]
+    return {
+        COMPONENTS["gen_status"]: f"📂 '{name}' 프로젝트 {len(order)}개를 불러왔습니다. 같은 폴더 이름으로 만들면 바뀐 줄만 다시 만듭니다.",
+        COMPONENTS["batch_box"]: gr.update(visible=True),
+        COMPONENTS["batch_html"]: '<div class="vl-hist">' + "".join(rows) + "</div>",
+        COMPONENTS["batch_files"]: files,
+        COMPONENTS["folder_state"]: str(folder),
+        COMPONENTS["open_btn"]: gr.update(visible=True),
+        COMPONENTS["project"]: name,
+    }
 
 
 def _fmt_sec(sec: float) -> str:
@@ -301,7 +355,7 @@ def _fmt_sec(sec: float) -> str:
 
 def generate(
     consent: bool, style_id: str, text: str, mode: str, engine_family: str | None, seed_value,
-    loud: bool, hq: bool, project: str, timeline_on: bool, retake: str, history: list[dict] | None,
+    loud: bool, hq: bool, speed_value, project: str, timeline_on: bool, retake: str, history: list[dict] | None,
 ):
     """만들기·다른 버전·번호 다시 만들기 공용. 결과 칸들을 dict 로 갱신한다."""
     made = list(history or [])
@@ -330,6 +384,7 @@ def generate(
             raise UserInputError("만들 문장을 적으세요.")
         loudness = -16.0 if loud else None
         sample_rate = 48000 if hq else None
+        speed = float(speed_value) if speed_value and abs(float(speed_value) - 1.0) > 1e-3 else None
         seed_text = str(seed_value or "").strip()
         if seed_text and not seed_text.isdigit():
             raise UserInputError("seed 는 숫자만 적거나 비워 두세요.")
@@ -338,7 +393,7 @@ def generate(
             yield out(status="⏳ 만드는 중…", batch_box=gr.update(visible=False))
             for kind, value in _run_in_thread(
                 lambda: service.synthesize(pieces[0], style_id, engine_name=engine_family, seed=seed,
-                                           loudness=loudness, sample_rate=sample_rate)
+                                           loudness=loudness, sample_rate=sample_rate, speed=speed)
             ):
                 if kind == "tick":
                     loading = not engine.is_model_loaded()
@@ -369,9 +424,9 @@ def generate(
         items = [
             service.BatchItem(
                 text=piece, id=f"{i:03d}_{service.safe_name(piece)[:24]}", style=style_id,
-                engine=engine_family, seed=takes.get(piece, seed),
+                engine=engine_family, seed=takes.get(piece, seed), paragraph=paragraph,
             )
-            for i, piece in enumerate(pieces, start=1)
+            for i, (piece, paragraph) in enumerate(split_pieces(text, mode), start=1)
         ]
         progress = {"done": 0, "made": 0, "made_sec": 0.0}
 
@@ -387,7 +442,7 @@ def generate(
             lambda: service.run_batch(
                 items, folder, default_style=style_id, default_engine=engine_family, on_item=on_item,
                 loudness=loudness, sample_rate=sample_rate, prune=True, timeline=timeline_on,
-                should_stop=STOP.is_set,
+                speed=speed, should_stop=STOP.is_set,
             )
         ):
             if kind == "tick":
@@ -406,7 +461,7 @@ def generate(
                     entry["url"] = _file_url(Path(entry["path"]))
                 rows.append(_result_row(entry, number))
             zip_path = _zip_project(folder, summary)
-            files = [str(zip_path)] + [summary[k] for k in ("narration_wav", "narration_srt") if summary.get(k)]
+            files = [str(zip_path)] + [summary[k] for k in ("narration_wav", "narration_srt", "narration_markers") if summary.get(k)]
             failed = [str(n) for n, e in enumerate(summary["items"], start=1) if not e.get("ok")]
             reused = sum(1 for e in summary["items"] if e.get("cached"))
             note = f"✅ {total}개 중 {summary['succeeded']}개 완료"
@@ -417,6 +472,8 @@ def generate(
                 note = "⏹ 멈췄습니다. " + note + " · 다시 누르면 남은 것만 만듭니다"
             elif failed:
                 note += f"\n\n⚠️ 실패 {len(failed)}개(번호 {', '.join(failed)}). 만들기를 다시 누르면 실패한 것만 다시 만듭니다."
+            if summary.get("warning"):
+                note += f"\n\n⚠️ {summary['warning']}"
             yield out(
                 status=note, batch_html='<div class="vl-hist">' + "".join(rows) + "</div>",
                 batch_files=files, folder_state=str(folder), open_btn=gr.update(visible=True),
@@ -475,7 +532,8 @@ RECORDING_GUIDE = """
 <li>녹음을 켜고 0.5초 쉰 뒤 읽기 시작하고, 끝까지 읽은 뒤 0.5초 쉬고 멈춥니다.</li>
 <li>말투마다 감정을 처음부터 끝까지 일정하게. 5–15초 분량이 가장 안정적입니다.</li>
 <li>블루투스 이어폰 마이크는 피하세요(소리가 좁아짐). 맥은 제어 센터의 마이크 모드를 '표준'으로, 아이폰 음성 메모는 '녹음 향상'을 끕니다.</li>
-<li>브라우저 녹음은 잡음 제거·자동 음량이 켜질 수 있습니다. 가장 좋은 것은 음성 메모·QuickTime으로 녹음해 파일로 올리는 것입니다.</li>
+<li>오른쪽 <b>고음질로 녹음</b>은 브라우저의 잡음 제거·에코 제거·자동 음량을 끄고 압축 없이 녹음합니다. 아래 칸의 마이크 녹음은 이것들이 켜질 수 있어 권하지 않습니다. 음성 메모·QuickTime으로 녹음해 올려도 좋습니다.</li>
+<li>등록한 뒤 <b>시험 문장 만들어 듣기</b>로 바로 확인하세요. 대본과 녹음이 어긋나거나 잡음·울림이 크면 여기서 드러납니다.</li>
 </ul>
 </div>
 """
@@ -554,9 +612,31 @@ def do_register(style_id: str, new_label: str, new_mode: bool, audio_path: str |
         COMPONENTS["new_box"]: gr.update(visible=False),
         COMPONENTS["new_mode"]: False,
         COMPONENTS["go_make"]: gr.update(visible=True),
+        COMPONENTS["trial_btn"]: gr.update(visible=True),
         COMPONENTS["empty_box"]: gr.update(visible=False),
         COMPONENTS["registered_id"]: style.id,
     }
+
+
+TRIAL_TEXT = "오늘도 좋은 하루 보내세요. 궁금한 점은 언제든 물어봐 주세요."
+
+
+def trial_generate(style_id: str, engine_family: str | None):
+    """등록한 녹음으로 짧은 문장을 seed 0 으로 한 번 만들어 대본·녹음 불일치 징후를 본다."""
+    if not style_id:
+        return None, "먼저 녹음을 등록하세요."
+    try:
+        result = service.synthesize(TRIAL_TEXT, style_id, engine_name=engine_family, seed=0)
+    except (UserInputError, RuntimeError) as exc:
+        return None, f"❌ 시험 생성 실패: {exc}"
+    ending = (result.quality or {}).get("ending") or {}
+    if ending.get("runaways"):
+        verdict = "⚠️ 문장 길이가 맞지 않아 다시 만든 적이 있습니다. 대본이 녹음과 같은지 확인하세요."
+    elif ending and not ending.get("coda", True):
+        verdict = "⚠️ 말끝 보정이 잘 안 됩니다(잡음·울림이 원인일 수 있음). 들어 보고 어색하면 더 조용한 곳에서 다시 녹음하세요."
+    else:
+        verdict = "✅ 정상입니다. 들어 보고 내 목소리와 비슷한지 확인하세요."
+    return str(result.path), f"{verdict}\n\n시험 문장: {TRIAL_TEXT} · {result.duration_sec:.1f}초 · {result.engine}"
 
 
 def reg_status_ref():
@@ -778,6 +858,14 @@ CSS = """
  .vl-col-make{order:-1}
  .vl-head{flex-direction:column !important;align-items:flex-start !important}
 }
+.vl-rec{border:1px dashed var(--border-color-primary);border-radius:12px;padding:10px 12px;margin-bottom:6px}
+.vl-rec-row{display:flex;align-items:center;gap:10px}
+.vl-rec-btn{padding:8px 16px;border-radius:999px;border:1px solid var(--color-accent);background:var(--color-accent);color:#fff;font-weight:600;cursor:pointer}
+.vl-rec-btn.on{background:#dc2626;border-color:#dc2626}
+.vl-rec-time{font-variant-numeric:tabular-nums;min-width:4em}
+.vl-rec-meter{flex:1;height:8px;border-radius:4px;background:var(--background-fill-secondary);overflow:hidden}
+.vl-rec-meter i{display:block;height:100%;width:0;background:#94a3b8}
+.vl-rec-note{font-size:.88rem;color:var(--body-text-color-subdued);margin-top:6px}
 """
 
 THEME = gr.themes.Soft(
@@ -785,6 +873,68 @@ THEME = gr.themes.Soft(
     neutral_hue="slate",
     font=["Pretendard", "Apple SD Gothic Neo", "system-ui", "sans-serif"],
 )
+
+RECORDER_HTML = """
+<div class="vl-rec" id="vl-rec">
+  <div class="vl-rec-row">
+    <button type="button" class="vl-rec-btn" id="vl-rec-btn" onclick="vlRecToggle()" aria-pressed="false">● 고음질로 녹음</button>
+    <span class="vl-rec-time" id="vl-rec-time" aria-live="polite">0.0초</span>
+    <span class="vl-rec-meter" aria-hidden="true"><i id="vl-rec-level"></i></span>
+  </div>
+  <div class="vl-rec-note" id="vl-rec-note">브라우저의 잡음 제거·에코 제거·자동 음량을 끄고 압축 없이 WAV로 녹음합니다(복제에 가장 좋음). 멈추면 아래 칸에 들어가고 바로 검사합니다.</div>
+</div>
+"""
+
+RECORDER_JS = """
+<script>
+(function(){
+  const S = {stream:null, ctx:null, proc:null, chunks:[], peak:0, start:0, timer:null};
+  function setNote(t){ const n=document.getElementById('vl-rec-note'); if(n) n.textContent=t; }
+  function wav(samples, rate){
+    const buf = new ArrayBuffer(44 + samples.length*2), v = new DataView(buf);
+    const w = (o,s)=>{ for(let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); };
+    w(0,'RIFF'); v.setUint32(4, 36+samples.length*2, true); w(8,'WAVE'); w(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,rate,true);
+    v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true); w(36,'data'); v.setUint32(40,samples.length*2,true);
+    for(let i=0;i<samples.length;i++){ const x=Math.max(-1,Math.min(1,samples[i])); v.setInt16(44+i*2, x<0?x*0x8000:x*0x7fff, true); }
+    return new Blob([buf], {type:'audio/wav'});
+  }
+  async function start(){
+    try{
+      S.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1}});
+    }catch(e){ setNote('마이크를 열지 못했습니다: '+e.message+' — 브라우저 주소창의 마이크 권한을 허용하거나, 음성 메모로 녹음해 파일로 올리세요.'); return; }
+    S.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const src = S.ctx.createMediaStreamSource(S.stream);
+    S.proc = S.ctx.createScriptProcessor(4096,1,1);
+    S.chunks=[]; S.peak=0;
+    S.proc.onaudioprocess = e => {
+      const d = new Float32Array(e.inputBuffer.getChannelData(0)); S.chunks.push(d);
+      let p=0; for(const x of d){ const a=Math.abs(x); if(a>p) p=a; } S.peak=Math.max(S.peak,p);
+      const lv=document.getElementById('vl-rec-level'); if(lv){ lv.style.width=Math.min(100,p*100)+'%'; lv.style.background = p>0.98?'#dc2626':(p>0.5?'#16a34a':'#94a3b8'); }
+    };
+    src.connect(S.proc); S.proc.connect(S.ctx.destination);
+    S.start = performance.now();
+    S.timer = setInterval(()=>{ const t=document.getElementById('vl-rec-time'); if(t) t.textContent=((performance.now()-S.start)/1000).toFixed(1)+'초'; }, 100);
+    const b=document.getElementById('vl-rec-btn'); b.textContent='■ 멈추고 넣기'; b.setAttribute('aria-pressed','true'); b.classList.add('on');
+    setNote('녹음 중… 0.5초 쉰 뒤 읽기 시작하고, 끝까지 읽은 뒤 0.5초 쉬고 멈추세요. 막대가 빨개지면 너무 큽니다.');
+  }
+  async function stop(){
+    clearInterval(S.timer);
+    S.proc.disconnect(); S.stream.getTracks().forEach(t=>t.stop());
+    const rate = S.ctx.sampleRate; await S.ctx.close();
+    let n=0; for(const c of S.chunks) n+=c.length; const all=new Float32Array(n); let o=0; for(const c of S.chunks){ all.set(c,o); o+=c.length; }
+    const b=document.getElementById('vl-rec-btn'); b.textContent='● 다시 녹음'; b.setAttribute('aria-pressed','false'); b.classList.remove('on');
+    const file = new File([wav(all, rate)], 'recording-'+Date.now()+'.wav', {type:'audio/wav'});
+    const input = document.querySelector('#vl-reg-audio input[type=file]');
+    if(!input){ setNote('녹음은 끝났지만 아래 칸에 넣지 못했습니다. 아래 칸의 업로드(↑) 아이콘을 눌러 업로드 모드로 바꾼 뒤 다시 녹음하세요.'); return; }
+    const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;
+    input.dispatchEvent(new Event('change', {bubbles:true}));
+    setNote((n/rate).toFixed(1)+'초 녹음을 넣었습니다' + (S.peak>0.98?' — 소리가 찢어졌을 수 있습니다. 조금 떨어져 다시 녹음하세요.':'. 아래 검사 결과를 확인하세요.'));
+  }
+  window.vlRecToggle = function(){ (S.stream && S.stream.active) ? stop() : start(); };
+})();
+</script>
+"""
 
 CONFIRM_JS = """
 (...args) => {
@@ -855,12 +1005,19 @@ def build_demo() -> gr.Blocks:
                                 )
                                 loud = gr.Checkbox(value=False, label="영상용 음량으로 맞추기(-16 LUFS)", info="문장마다 음량이 고르게. 유튜브·교육 영상에 맞춤")
                                 hq = gr.Checkbox(value=False, label="48kHz로 저장", info="영상 편집 프로젝트와 같은 표본율")
+                            speed_pick = gr.Slider(
+                                minimum=0.8, maximum=1.25, step=0.05, value=1.0, label="말 빠르기",
+                                info="1 = 그대로. 음높이는 그대로 두고 빠르기만 바꿉니다(화면 전환에 맞출 때).",
+                            )
                             with gr.Row():
                                 project = gr.Textbox(
                                     label="여러 파일 폴더 이름", placeholder="비우면 narration-날짜-시각",
                                     info="outputs/projects/<이름>/ 에 001_문장.wav 순서로 저장. 같은 이름이면 바뀐 문장만 다시 만듭니다.",
                                 )
-                                timeline_on = gr.Checkbox(value=True, label="이어 붙인 WAV와 자막(SRT)도 만들기")
+                                timeline_on = gr.Checkbox(
+                                    value=True, label="이어 붙인 WAV·자막(SRT)·편집 마커(CSV)도 만들기",
+                                    info="문장 사이 0.4초, 빈 줄로 나눈 문단 사이 1초를 쉽니다.",
+                                )
                         with gr.Accordion("발음 고치기 — 잘못 읽는 단어를 소리 나는 대로", open=False):
                             gr.Markdown(
                                 "예: `배지` → `뺏지`. 화면·API·명령줄에 모두 적용됩니다. 영문은 단어 단위로 바꿉니다(`AI`를 넣어도 `OpenAI`는 그대로). "
@@ -904,6 +1061,11 @@ def build_demo() -> gr.Blocks:
                 with gr.Column(elem_classes=["vl-panel"]):
                     gr.HTML('<div class="vl-sec">지난 결과 <small>이번에 연 화면에서 만든 것</small></div>')
                     history_html = gr.HTML(render_history([]))
+                    with gr.Accordion("이전 프로젝트 불러오기 — 여러 파일로 만든 폴더", open=False):
+                        with gr.Row():
+                            project_pick = gr.Dropdown(choices=list_projects(), label="프로젝트", scale=3, allow_custom_value=False)
+                            project_refresh = gr.Button("목록 새로 고침", size="sm", scale=1)
+                            project_load = gr.Button("불러오기", size="sm", variant="secondary", scale=1)
 
             # ------------------------------------------------ 목소리 등록
             with gr.Tab("목소리 등록", id="register"):
@@ -925,14 +1087,21 @@ def build_demo() -> gr.Blocks:
                     with gr.Column(scale=6, elem_classes=["vl-panel"]):
                         reg_guide = gr.Markdown(first[0])
                         gr.HTML('<div class="vl-sec">2. 녹음하거나 파일 올리기 <small>WAV·M4A(아이폰 음성 메모)·MP3</small></div>')
-                        reg_audio = gr.Audio(sources=["upload", "microphone"], type="filepath", show_label=False)
+                        gr.HTML(RECORDER_HTML)
+                        reg_audio = gr.Audio(
+                            sources=["upload", "microphone"], type="filepath", show_label=False, elem_id="vl-reg-audio",
+                        )
                         reg_check = gr.Markdown("", elem_id="vl-check")
                         gr.HTML('<div class="vl-sec">3. 녹음에서 실제로 읽은 문장 <small>틀리게 읽었다면 읽은 그대로 고치세요</small></div>')
                         reg_script = gr.Textbox(value=first[1], show_label=False, lines=3)
                         reg_confirm = gr.Checkbox(value=True, visible=False)
                         reg_go = gr.Button(first[4]["value"], variant="primary", elem_id="vl-reg-go")
                         reg_status = gr.Markdown("", elem_id="vl-reg-status")
-                        go_make = gr.Button("이 말투로 만들러 가기 →", visible=False, variant="secondary")
+                        with gr.Row():
+                            trial_btn = gr.Button("🔊 이 녹음으로 시험 문장 만들어 듣기", visible=False, size="sm")
+                            go_make = gr.Button("이 말투로 만들러 가기 →", visible=False, variant="secondary", size="sm")
+                        trial_audio = gr.Audio(type="filepath", interactive=False, show_label=False, autoplay=True)
+                        trial_note = gr.Markdown("")
 
             # ------------------------------------------------ 에이전트·MCP
             with gr.Tab("고급 · 에이전트 연결", id="agent"):
@@ -999,7 +1168,8 @@ def build_demo() -> gr.Blocks:
             history_html=history_html, history_state=history_state, batch_box=batch_box, batch_html=batch_html,
             batch_files=batch_files, folder_state=folder_state, open_btn=open_btn, style=style, style_info=style_info,
             reg_style=reg_style, reg_current=reg_current, new_box=new_box, new_mode=new_mode, go_make=go_make,
-            empty_box=empty_box, registered_id=registered_id, reg_status=reg_status,
+            empty_box=empty_box, registered_id=registered_id, reg_status=reg_status, project=project,
+            trial_btn=trial_btn,
         )
         gen_outputs = [
             gen_status, status_chip, result_audio, result_dl, again, history_html, history_state,
@@ -1033,7 +1203,7 @@ def build_demo() -> gr.Blocks:
         def unlock(consent_value):
             return gr.update(interactive=bool(consent_value), value="▶ 만들기"), gr.update(visible=False), gr.update(interactive=True)
 
-        gen_inputs = [consent, style, text, mode, engine_pick, seed_box, loud, hq, project, timeline_on]
+        gen_inputs = [consent, style, text, mode, engine_pick, seed_box, loud, hq, speed_pick, project, timeline_on]
         for trigger, with_retake in ((go, False), (again, False), (retake_btn, True)):
             trigger.click(lock, outputs=[go, stop_btn, again], queue=False, **private).then(
                 (lambda *a: (yield from generate(*a))) if with_retake else
@@ -1061,7 +1231,7 @@ def build_demo() -> gr.Blocks:
         reg_go.click(
             do_register,
             inputs=[reg_style, new_label, new_mode, reg_audio, reg_script, style, reg_confirm],
-            outputs=[reg_status, style, style_info, reg_style, reg_current, new_box, new_mode, go_make, empty_box, registered_id],
+            outputs=[reg_status, style, style_info, reg_style, reg_current, new_box, new_mode, go_make, empty_box, registered_id, trial_btn],
             js=CONFIRM_JS, concurrency_limit=1, **private,
         ).then(
             lambda t, m, s, c: render_readiness(t, m, s, c), inputs=readiness_inputs, outputs=[ready_line], queue=False, **private,
@@ -1071,6 +1241,17 @@ def build_demo() -> gr.Blocks:
             inputs=[registered_id], outputs=[tabs, style], queue=False, **private,
         )
         check.click(check_connection, outputs=[check_out], queue=False, **private)
+        trial_btn.click(
+            lambda: gr.update(interactive=False, value="만드는 중…"), outputs=[trial_btn], queue=False, **private,
+        ).then(
+            trial_generate, inputs=[registered_id, engine_pick], outputs=[trial_audio, trial_note],
+            concurrency_limit=1, concurrency_id="tts", **private,
+        ).then(lambda: gr.update(interactive=True, value="🔊 이 녹음으로 시험 문장 만들어 듣기"), outputs=[trial_btn], queue=False, **private)
+        project_refresh.click(lambda: gr.update(choices=list_projects()), outputs=[project_pick], queue=False, **private)
+        project_load.click(
+            load_project, inputs=[project_pick],
+            outputs=[gen_status, batch_box, batch_html, batch_files, folder_state, open_btn, project], **private,
+        )
 
         l_button.click(
             legacy_synthesize,
@@ -1117,6 +1298,7 @@ def create_app() -> FastAPI:
         path="",
         theme=THEME,
         css=CSS,
+        head=RECORDER_JS,
         footer_links=["api"],
         allowed_paths=[str(local_env.REFERENCES), str(local_env.OUTPUTS)],
         max_file_size="50mb",

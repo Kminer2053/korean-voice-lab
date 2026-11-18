@@ -147,7 +147,10 @@ def _write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
     if peak > 0.999:  # 잘라 내지 않고(찢어짐) 전체를 조금 줄인다
         audio = audio * (0.999 / peak)
     clipped = np.clip(audio, -1.0, 1.0)
-    pcm = (clipped * 32767.0).astype("<i2")
+    # 16비트로 줄일 때 ±1 LSB 삼각 디더(작은 소리의 양자화 일그러짐 방지). 같은 입력이면 같은 결과가 나오게 고정 시드.
+    rng = np.random.default_rng(clipped.size)
+    dither = (rng.random(clipped.size) - rng.random(clipped.size)).astype(np.float32)
+    pcm = np.clip(np.round(clipped * 32767.0 + dither), -32768, 32767).astype("<i2")
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
@@ -186,6 +189,7 @@ def synthesize(
     language: str = "ko",
     loudness_lufs: float | None = None,
     export_rate: int | None = None,
+    speed: float | None = None,
 ) -> SynthesisReport:
     """참조 녹음 하나(+ 대본)로 text 를 읽은 WAV 를 만든다.
 
@@ -236,6 +240,8 @@ def synthesize(
         import audio_fx
 
         rate = out.sample_rate
+        if speed and abs(float(speed) - 1.0) > 1e-3:
+            audio = audio_fx.change_tempo(audio, rate, float(speed))  # 음높이는 그대로, 빠르기만
         audio = audio_fx.tidy_head(audio, rate)  # 앞 무음 0.1초로(클립 간격을 고르게)
         audio = ensure_tail_silence(audio, rate, TAIL_SILENCE_SEC)
         post: dict = {}

@@ -65,37 +65,38 @@ def _engines() -> dict[str, Any]:
 
 
 def _speak(text: str, style: str, output_path: str | None, seed: int | None, engine: str | None,
-           loudness: float | None = None, sample_rate: int | None = None) -> dict[str, Any]:
+           loudness: float | None = None, sample_rate: int | None = None, speed: float | None = None) -> dict[str, Any]:
     out = str(Path(output_path).expanduser().resolve()) if output_path else None
     base = _base()
     if base:
         return cli._http(
             "POST", base + "/api/tts",
             {"text": text, "style": style, "engine": engine, "format": "json", "output_path": out, "seed": seed,
-             "loudness": loudness, "sample_rate": sample_rate},
+             "loudness": loudness, "sample_rate": sample_rate, "speed": speed},
         )
     import service
 
     return service.synthesize(text, style, output_path=out, seed=seed, engine_name=engine,
-                              loudness=loudness, sample_rate=sample_rate).to_dict()
+                              loudness=loudness, sample_rate=sample_rate, speed=speed).to_dict()
 
 
 def _batch(items: list[Any], out_dir: str, style: str | None, force: bool, engine: str | None,
-           loudness: float | None = None, sample_rate: int | None = None, timeline: bool = False) -> dict[str, Any]:
+           loudness: float | None = None, sample_rate: int | None = None, timeline: bool = False,
+           speed: float | None = None) -> dict[str, Any]:
     folder = str(Path(out_dir).expanduser().resolve())
     base = _base()
     if base:
         return cli._http(
             "POST", base + "/api/batch",
             {"items": items, "style": style, "engine": engine, "out_dir": folder, "skip_existing": not force,
-             "loudness": loudness, "sample_rate": sample_rate, "timeline": timeline},
+             "loudness": loudness, "sample_rate": sample_rate, "timeline": timeline, "speed": speed},
             timeout=24 * 3600,
         )
     import service
 
     parsed = service.parse_items({"items": items, "engine": engine}, default_style=style)
     return service.run_batch(parsed, folder, default_style=style, skip_existing=not force,
-                             loudness=loudness, sample_rate=sample_rate, timeline=timeline)
+                             loudness=loudness, sample_rate=sample_rate, timeline=timeline, speed=speed)
 
 
 @server.tool()
@@ -113,7 +114,7 @@ async def list_engines() -> dict[str, Any]:
 @server.tool()
 async def speak(
     text: str, style: str = "default", output_path: str | None = None, seed: int | None = None, engine: str | None = None,
-    loudness: float | None = None, sample_rate: int | None = None,
+    loudness: float | None = None, sample_rate: int | None = None, speed: float | None = None,
 ) -> dict[str, Any]:
     """문장 하나를 사용자 목소리로 읽어 WAV 하나를 만든다.
 
@@ -121,16 +122,17 @@ async def speak(
     output_path: 결과 WAV 절대 경로(없으면 프로젝트 outputs/). seed: 같은 결과를 다시 얻고 싶을 때.
     engine: qwen3 · chatterbox 또는 정확한 엔진 id. 없으면 기본 엔진.
     loudness: 통합 음량(LUFS)으로 맞춤, 예 -16(영상). sample_rate: 저장 표본율, 예 48000.
+    speed: 말 빠르기 0.8–1.25(음높이는 그대로), 예 1.1.
     반환: {ok, path, duration_sec, sample_rate, style, engine, seed, quality, warning, ...}
     warning 이 있으면 사람이 들어 보고 다른 seed 로 다시 만드는 것이 좋다.
     """
-    return await anyio.to_thread.run_sync(_call, _speak, text, style, output_path, seed, engine, loudness, sample_rate)
+    return await anyio.to_thread.run_sync(_call, _speak, text, style, output_path, seed, engine, loudness, sample_rate, speed)
 
 
 @server.tool()
 async def speak_batch(
     items: list[Any], out_dir: str, style: str | None = None, force: bool = False, engine: str | None = None,
-    loudness: float | None = None, sample_rate: int | None = None, timeline: bool = False,
+    loudness: float | None = None, sample_rate: int | None = None, timeline: bool = False, speed: float | None = None,
 ) -> dict[str, Any]:
     """대사 여러 개를 한 번에 만든다. 항목마다 out_dir/<id>.wav 하나, 그리고 out_dir/manifest.json.
 
@@ -138,10 +140,12 @@ async def speak_batch(
     style: 항목에 style 이 없을 때 쓸 말투. engine: 항목에 engine 이 없을 때 쓸 모델·엔진.
     force: 이미 만든 같은 문장도 다시 만든다(기본은 재사용).
     loudness: 모든 문장을 같은 통합 음량(LUFS)으로, 예 -16. sample_rate: 예 48000.
-    timeline: true 면 순서대로 이어 붙인 narration.wav 와 자막 narration.srt 도 만들고 항목에 start_sec·end_sec 를 넣는다.
+    timeline: true 면 순서대로 이어 붙인 narration.wav, 자막 narration.srt, 마커 narration_markers.csv 도 만들고
+    항목에 start_sec·end_sec 를 넣는다. 항목에 "paragraph" 번호를 주면 문단 사이를 더 길게 쉰다.
+    speed: 말 빠르기 0.8–1.25.
     반환: {ok, succeeded, failed, items: [{id, ok, path, duration_sec, seed, warning?, error?}], manifest}
     """
-    return await anyio.to_thread.run_sync(_call, _batch, items, out_dir, style, force, engine, loudness, sample_rate, timeline)
+    return await anyio.to_thread.run_sync(_call, _batch, items, out_dir, style, force, engine, loudness, sample_rate, timeline, speed)
 
 
 @server.tool()

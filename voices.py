@@ -30,37 +30,46 @@ class BuiltinStyle:
     script: str
     prosody: str
     description: str
+    legacy_script: str = ""  # 예전 기본 대본. 대본 칸 없이 저장된 예전 등록은 이것을 읽었다고 본다.
 
 
-# 기본 말투 4종. 대본은 녹음할 때 읽을 권장 문장이다(5–15초 분량).
+# 기본 말투 4종. 대본은 녹음할 때 읽을 권장 문장이다(8–12초 분량, 받침·된소리·거센소리·이중모음을 고루).
 BUILTIN_STYLES: tuple[BuiltinStyle, ...] = (
     BuiltinStyle(
         "default",
         "기본",
-        "오늘은 집에 들어와서 창문을 열어 두었어요. 바람이 시원해서 한참 그냥 서 있었어요.",
+        "오늘은 집에 들어와서 창문을 열어 두었어요. 바람이 시원해서 한참 그냥 서 있었어요. "
+        "저녁에는 따뜻한 보리차를 끓여 마시고, 읽다 만 책을 끝까지 펼쳐 봤습니다.",
         "또박또박, 평소 속도로 읽습니다. 끝을 올리거나 감정을 싣지 않습니다.",
         "담담한 평서문. 음색 기준.",
+        "오늘은 집에 들어와서 창문을 열어 두었어요. 바람이 시원해서 한참 그냥 서 있었어요.",
     ),
     BuiltinStyle(
         "talk",
         "대화",
-        "저녁은 뭐 먹을까요? 시장에 잠깐 같이 나가 볼까요?",
+        "저녁은 뭐 먹을까요? 시장에 잠깐 같이 나가 볼까요? 요즘 떡볶이 집이 새로 생겼다던데, "
+        "줄이 꽤 길대요. 그래도 한번 가 봐요, 궁금하잖아요.",
         "대화하듯 읽습니다. 질문의 끝은 올립니다.",
         "말을 거는 듯한 구어체. 쿠키 영상·브이로그.",
+        "저녁은 뭐 먹을까요? 시장에 잠깐 같이 나가 볼까요?",
     ),
     BuiltinStyle(
         "guide",
         "안내",
-        "내일 아침에는 병원에 들렀다가 시장에 갑니다. 주차는 건물 뒷문이 더 편합니다.",
+        "내일 아침에는 병원에 들렀다가 시장에 갑니다. 주차는 건물 뒷문이 더 편합니다. "
+        "접수는 아홉 시부터이고, 진료 카드는 의자 옆 창구에 내시면 됩니다.",
         "차근차근 알려 주듯 읽습니다. 서두르거나 들뜨지 않습니다.",
         "차분한 설명조. 발표·강의 내레이션.",
+        "내일 아침에는 병원에 들렀다가 시장에 갑니다. 주차는 건물 뒷문이 더 편합니다.",
     ),
     BuiltinStyle(
         "joy",
         "기쁨",
-        "정말요? 그 소식 사실이에요? 와, 너무 반가워요. 이런 날이 오다니요.",
+        "정말요? 그 소식 사실이에요? 와, 너무 반가워요. 이런 날이 오다니요! "
+        "다 같이 축하하러 꼭 모여요. 케이크는 제가 쏠게요.",
         "반갑고 조금 놀란 톤으로 읽습니다. 처음부터 끝까지 한 톤으로 눕히지 않습니다.",
         "밝고 들뜬 감정 표현.",
+        "정말요? 그 소식 사실이에요? 와, 너무 반가워요. 이런 날이 오다니요.",
     ),
 )
 BUILTIN_BY_ID = {style.id: style for style in BUILTIN_STYLES}
@@ -154,7 +163,7 @@ def list_styles() -> list[Style]:
                 file=str(entry.get("file") or ""),
                 # 대본 칸이 있는 기록은 그대로 쓴다(빈 대본을 읽지 않은 기본 대본으로 바꾸지 않음).
                 # 예전 기록(대본 칸 없음)만 기본 대본을 읽었다고 본다.
-                script=str(entry["script"] if "script" in entry else builtin.script) if entry.get("file") else builtin.script,
+                script=str(entry["script"] if "script" in entry else (builtin.legacy_script or builtin.script)) if entry.get("file") else builtin.script,
                 prosody=builtin.prosody,
                 description=builtin.description,
                 builtin=True,

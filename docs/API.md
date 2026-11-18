@@ -98,7 +98,7 @@
 | `use_lexicon` | bool | `true` | `lexicon.json` 발음 사전을 적용할지 |
 | `ref_text` | string | 없음 | 참조 녹음 대본을 이번에만 바꿀 때 |
 | `output_path` | string | 없음 | 결과를 쓸 절대 경로(서버와 같은 컴퓨터). 없으면 `outputs/` |
-| `speed` | number | 없음 | 받기만 하고 쓰지 않습니다. 모델이 아직 지원하지 않습니다. |
+| `speed` | number | 없음 | 말 빠르기 0.8–1.25(음높이는 그대로, ffmpeg atempo). `1`이면 그대로, `1.1`은 10% 빠르게. 범위를 넘으면 400(`POST /tts`는 가장 가까운 값으로 맞춤) |
 | `loudness` | number | 없음 | 통합 음량(LUFS, ITU-R BS.1770)으로 맞춥니다. 영상은 보통 `-16`, 유튜브 `-14`. 트루 피크는 -1 dBTP 아래로 둡니다. 없으면 모델 출력 그대로 |
 | `sample_rate` | number | 없음 | 저장 표본율(16000·22050·24000·44100·48000). 영상 편집은 `48000`. 없으면 모델 그대로(24000) |
 
@@ -153,13 +153,16 @@
 | `format` | `json` \| `zip` | `json` | `zip`이면 WAV와 manifest를 묶어 본문으로 돌려줍니다. |
 | `loudness` | number | 없음 | 모든 문장을 같은 통합 음량(LUFS)으로. 예: `-16` |
 | `sample_rate` | number | 없음 | 저장 표본율. 예: `48000` |
-| `timeline` | bool | `false` | 순서대로 이어 붙인 `narration.wav`와 자막 `narration.srt`도 만들고, 항목마다 `start_sec`·`end_sec`를 넣습니다. |
+| `timeline` | bool | `false` | 순서대로 이어 붙인 `narration.wav`, 자막 `narration.srt`, 편집 프로그램 마커 `narration_markers.csv`(이름·시작·끝·길이·문장)도 만들고, 항목마다 `start_sec`·`end_sec`를 넣습니다. |
 | `gap_sec` | number | `0.4` | `timeline`의 문장 사이 쉼(초) |
+| `paragraph_gap_sec` | number | `1.0` | `timeline`의 문단 사이 쉼(초). 항목의 `paragraph` 번호가 바뀌는 곳이 문단 경계입니다(명령줄 TXT는 빈 줄). |
+| `speed` | number | 없음 | 모든 문장의 말 빠르기(0.8–1.25) |
 | `prune` | bool | `false` | 이번 목록에 없는 예전 결과 파일을 `_stale/`로 옮기고 manifest에서 뺍니다(지우지 않음). |
 
 파일 이름은 `id`가 있으면 `<id>.wav`(안전한 글자만 남김), 없으면 `001.wav`, `002.wav`처럼 순번입니다.
 `out_dir/manifest.json`에 항목별 결과와 입력 해시(`sha`), 이번 순서(`order`)를 남깁니다. 재사용 판단은 이 해시로 하고, 해시에는 엔진 id와 지정한 `loudness`·`sample_rate`도 들어갑니다(바꾸면 다시 만듦).
 만든 결과는 `out_dir/.voicelab-cache/<sha>.wav`에도 둡니다. 그래서 대본 중간에 줄을 넣어 번호가 밀려도 바뀐 줄만 새로 만들고, 항목에 다른 `seed`를 주어 다시 만들어도 이전 버전이 그 폴더에 남습니다.
+한 번의 결과에 여러 엔진이 섞이면 응답에 `warning`이 붙습니다(한 영상 안에서는 목소리 느낌이 달라짐).
 일괄 생성 중에는 `GET /api/health`의 `batch`에 `{"done", "total", "id"}`가 나옵니다(명령줄은 이것으로 진행을 보여 줍니다).
 
 응답(`format: "json"`):
@@ -192,7 +195,11 @@
 | 잡음(말소리와 잡음 바닥 차이) | 15dB 미만 | 25dB 미만 |
 | 음질 | 표본율 16kHz 미만 | 4–8kHz 대역이 거의 없음(블루투스·전화) |
 | 끝 잘림·첫소리 잘림 | | 말소리가 파일 끝·처음에 붙어 있음 |
+| 울림 | | 말이 멈춘 뒤 꼬리로 어림한 잔향 0.5초 초과(0.8초 초과면 강한 경고) |
+| 웅 소리 | | 쉼 구간에 50·60Hz 전원 험과 배음 |
+| 스테레오 | | 한쪽 채널이 비었거나(10dB 이상 약함) 두 채널이 딴판(위상 반전)이면 강한 채널만 씀. 채널마다 찢어짐 검사 |
 
+표에 없는 기본 대본은 8–12초 분량(받침·된소리·거센소리·이중모음 포함)입니다. 예전에 대본 칸 없이 등록한 녹음은 예전 기본 대본을 읽은 것으로 봅니다.
 통과하면 직류 성분 제거, 70Hz 아래 웅웅거림 줄이기, 앞뒤 무음을 0.2/0.3초로 정리, 말소리 크기를 -20dBFS 근처로 맞춘 뒤 16-bit 모노 WAV로 `references/`에 저장합니다.
 응답의 `qc`에 측정값(`metrics`)과 항목별 판정(`checks`)이 들어갑니다. 이 기록은 말투 정보(`GET /api/styles`)에도 남습니다.
 

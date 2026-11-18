@@ -71,7 +71,7 @@ TEXTS = {
 }
 
 CORE_TEXTS = ["normal", "tiny", "long", "lines", "english", "mixed"]
-REF_VARIANTS = ["ko", "en", "short1", "short2", "short3", "short4", "short5", "long", "pad", "noisy", "quiet", "clipped", "lowrate", "wrongtext"]
+REF_VARIANTS = ["ko", "en", "short1", "short2", "short3", "short4", "short5", "long", "pad", "noisy", "reverb", "quiet", "clipped", "lowrate", "wrongtext"]
 
 
 # ---------------------------------------------------------------- 참조 녹음 만들기
@@ -128,6 +128,15 @@ def _os_tts(text: str, lang: str, out_wav: Path) -> None:
     _write(out_wav, _resample(data, rate, 24000), 24000)
 
 
+def _reverb(x: np.ndarray, rate: int, t60: float, rng) -> np.ndarray:
+    """울리는 방(잔향 t60 초)을 흉내 낸 녹음."""
+    n = int(rate * t60 * 1.2)
+    ir = rng.normal(0, 1, n) * np.exp(-6.9 * np.arange(n) / (rate * t60))
+    ir[0] = 3.0
+    y = np.convolve(x, ir)[: x.size + n]
+    return (y / np.abs(y).max() * 0.7).astype(np.float32)
+
+
 def build_refs(folder: Path, ref_dir: Path | None) -> dict[str, tuple[Path, str]]:
     """참조 변형들: id → (wav, 대본)."""
     folder.mkdir(parents=True, exist_ok=True)
@@ -147,6 +156,7 @@ def build_refs(folder: Path, ref_dir: Path | None) -> dict[str, tuple[Path, str]
         "long": (np.concatenate([x, np.zeros(int(rate * 0.5), np.float32)] * 3), " ".join([KO_SCRIPT] * 3)),
         "pad": (np.concatenate([np.zeros(rate * 2, np.float32), x, np.zeros(rate * 2, np.float32)]), KO_SCRIPT),
         "noisy": (x + rng.normal(0, np.sqrt(np.mean(x**2) / 10), x.size).astype(np.float32), KO_SCRIPT),
+        "reverb": (_reverb(x, rate, 0.9, rng), KO_SCRIPT),
         "quiet": (x * (0.01 / peak), KO_SCRIPT),
         "clipped": (np.clip(x * (8.0 / peak), -1, 1), KO_SCRIPT),
         "lowrate": (_resample(_resample(x, rate, 8000), 8000, rate), KO_SCRIPT),

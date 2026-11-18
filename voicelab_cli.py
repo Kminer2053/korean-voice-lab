@@ -62,27 +62,38 @@ def server_alive(base: str) -> bool:
 
 # ---------------------------------------------------------------- 입력 읽기
 def read_items(path: str) -> Any:
-    """JSON(목록 또는 {style, items}) 또는 TXT(줄마다 한 문장, # 주석·빈 줄 무시)."""
+    """JSON(목록 또는 {style, items}) 또는 TXT(줄마다 한 문장, # 주석 무시, 빈 줄은 문단 나눔)."""
     raw = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     stripped = raw.lstrip()
     if path.endswith(".json") or stripped.startswith(("[", "{")):
         return json.loads(raw)
     if path.endswith(".jsonl"):
         return [json.loads(line) for line in raw.splitlines() if line.strip()]
-    return [line.strip() for line in raw.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    items: list[dict[str, Any]] = []
+    paragraph = 1
+    for line in raw.splitlines():
+        if not line.strip():
+            if items and items[-1]["paragraph"] == paragraph:
+                paragraph += 1  # 빈 줄 = 문단 경계(--timeline 에서 더 길게 쉰다)
+            continue
+        if line.lstrip().startswith("#"):
+            continue
+        items.append({"text": line.strip(), "paragraph": paragraph})
+    return items
 
 
 # ---------------------------------------------------------------- 명령
 def _add_audio_options(p) -> None:
     p.add_argument("--loudness", type=float, help="통합 음량(LUFS)으로 맞춤. 예: -16(영상), -14(유튜브)")
     p.add_argument("--sample-rate", type=int, dest="sample_rate", help="저장 표본율. 예: 48000(영상 편집)")
+    p.add_argument("--speed", type=float, help="말 빠르기(0.8–1.25, 음높이는 그대로). 예: 1.1 = 10%% 빠르게")
 
 
 def cmd_say(args, base: str | None) -> dict:
     out = str(Path(args.output).expanduser().resolve()) if args.output else None
     if base:
         body = {"text": args.text, "style": args.style, "engine": args.engine, "format": "json", "seed": args.seed, "output_path": out,
-                "loudness": args.loudness, "sample_rate": args.sample_rate}
+                "loudness": args.loudness, "sample_rate": args.sample_rate, "speed": args.speed}
         if args.no_lexicon:
             body["use_lexicon"] = False
         return _http("POST", base + "/api/tts", body)
@@ -90,7 +101,7 @@ def cmd_say(args, base: str | None) -> dict:
 
     result = service.synthesize(
         args.text, args.style, output_path=out, seed=args.seed, engine_name=args.engine,
-        use_lexicon=not args.no_lexicon, loudness=args.loudness, sample_rate=args.sample_rate,
+        use_lexicon=not args.no_lexicon, loudness=args.loudness, sample_rate=args.sample_rate, speed=args.speed,
     )
     return result.to_dict()
 
@@ -136,7 +147,7 @@ def cmd_batch(args, base: str | None) -> dict:
 
 def _batch_options(args) -> dict[str, Any]:
     return {"loudness": args.loudness, "sample_rate": args.sample_rate, "prune": args.prune,
-            "timeline": args.timeline, "gap_sec": args.gap}
+            "timeline": args.timeline, "gap_sec": args.gap, "paragraph_gap_sec": args.paragraph_gap, "speed": args.speed}
 
 
 def _with_progress(base: str, call):
@@ -225,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_audio_options(p)
     p.add_argument("--timeline", action="store_true", help="이어 붙인 narration.wav 와 자막 narration.srt 도 만듦")
     p.add_argument("--gap", type=float, default=0.4, help="--timeline 의 문장 사이 쉼(초, 기본 0.4)")
+    p.add_argument("--paragraph-gap", type=float, default=1.0, dest="paragraph_gap",
+                   help="--timeline 의 문단 사이 쉼(초, 기본 1.0). TXT 는 빈 줄, JSON 은 항목의 paragraph 번호로 문단을 나눔")
     p.add_argument("--prune", action="store_true", help="이번 목록에 없는 예전 결과를 _stale/ 로 옮김")
     p.set_defaults(func=cmd_batch)
 

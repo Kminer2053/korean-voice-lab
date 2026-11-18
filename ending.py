@@ -13,7 +13,8 @@
   읽게 한 뒤, 문장과 꼬리말 사이의 쉼에서 자른다.
 - 자른 결과는 아래를 모두 지켜야 쓴다. 아니면 seed 를 바꿔 다시 만들고, 끝내 안 되면 꼬리말 없이 만든다.
   - 꼬리말 앞 쉼이 MIN_GAP_SEC 이상
-  - 쉼 안 소리가 한 번은 최대 음량의 MAX_FLOOR 아래로 떨어짐(아니면 꼬리말 첫소리가 섞여 끝에 '쿵' 소리가 남)
+  - 쉼 안 소리가 한 번은 최대 음량의 MAX_FLOOR(잡음이 섞인 결과는 그 잡음 바닥의 2배, 최대 1%) 아래로 떨어짐
+    (아니면 꼬리말 첫소리가 섞여 끝에 '쿵' 소리가 남)
   - 잘라 낸 꼬리말이 MAX_CODA_SEC 이하(더 길면 문장 중간의 쉼을 잘못 잡은 것)
 """
 
@@ -121,14 +122,19 @@ def cut_before_coda(audio: np.ndarray, rate: int) -> tuple[np.ndarray | None, di
         gap = (k - j) * HOP_SEC
         if j >= 0 and gap >= SCAN_GAP_SEC:
             start = j + 1  # 쉼 시작(문장 마지막 음절이 잦아든 곳)
+            # 잡음이 섞인 결과(잡음 있는 참조 녹음)는 쉼이 -60dB 까지 안 내려간다. 쉼이 그 결과의 잡음 바닥
+            # 근처까지 내려갔으면 꼬리말 첫소리가 섞이지 않은 진짜 쉼으로 본다(상한 -40dB).
+            noise = float(np.percentile(env, 5)) / peak
+            allowed = min(0.01, max(MAX_FLOOR, noise * 2.0))
             info = {
                 "gap_sec": round(gap, 3),
                 "coda_sec": round((last - k) * HOP_SEC, 3),
                 "floor": round(float(env[start : k + 1].min()) / peak, 5),
+                "allowed_floor": round(allowed, 5),
             }
             if gap < MIN_GAP_SEC:
                 return None, {**info, "reason": "short_gap"}
-            if info["floor"] > MAX_FLOOR:
+            if info["floor"] > allowed:
                 return None, {**info, "reason": "no_silence"}
             if info["coda_sec"] > MAX_CODA_SEC:
                 return None, {**info, "reason": "long_coda"}
