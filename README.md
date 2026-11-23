@@ -13,6 +13,9 @@
 ![에이전트](https://img.shields.io/badge/에이전트-MCP%20·%20명령줄%20·%20HTTP-EA580C)
 ![Local-first](https://img.shields.io/badge/Local--first-127.0.0.1%20전용-2E7D32)
 ![License](https://img.shields.io/badge/License-MIT-EAB308)
+[![npm](https://img.shields.io/npm/v/korean-voice-lab?logo=npm&label=npx)](https://www.npmjs.com/package/korean-voice-lab)
+
+<sub>한국어 · <a href="README.en.md">English</a></sub>
 
 <br>
 
@@ -122,6 +125,18 @@ API·명령줄·MCP에서 `engine`에 `qwen3`이나 `chatterbox`만 적으면 �
 | 컴퓨터 | Apple Silicon(M1 이상). 16GB에서 검증 | 64비트 Windows 10/11. NVIDIA GPU(VRAM 8GB 이상) 권장, 없으면 CPU(느림) |
 | Python | 3.11–3.13 (`brew install python@3.12`) | 3.11–3.12 ([python.org](https://www.python.org/downloads/), py launcher 포함) |
 | 디스크 | 약 6GB(가상환경과 모델 두 개) | 약 10GB(PyTorch와 모델) |
+
+### 한 줄 설치 (npx, 맥·윈도우·리눅스)
+
+Node.js 18 이상과 Python이 있으면 됩니다. 앱은 `~/.korean-voice-lab`에 펼쳐지고 그 안의 가상환경에만 설치됩니다.
+
+```bash
+npx korean-voice-lab install          # 윈도우·리눅스에서 Qwen3도 쓰려면 --with-qwen
+npx korean-voice-lab start            # 화면 열기(127.0.0.1:7860)
+claude mcp add voicelab -- npx -y korean-voice-lab mcp   # 에이전트에 연결
+```
+
+`npx korean-voice-lab doctor`로 상태를 보고, `update`로 새 버전 코드로 바꿉니다(녹음·결과는 그대로). 아래처럼 저장소를 직접 받아 써도 됩니다.
 
 ### 맥
 
