@@ -1,0 +1,71 @@
+{
+  "name": "korean-voice-lab",
+  "version": "0.1.0",
+  "description": "Local Korean voice-cloning TTS in your own voice — web UI, HTTP API, CLI and MCP server (macOS MLX · Windows/Linux PyTorch, Qwen3-TTS · Chatterbox)",
+  "keywords": [
+    "tts",
+    "text-to-speech",
+    "voice-cloning",
+    "korean",
+    "mcp",
+    "mcp-server",
+    "mlx",
+    "qwen3-tts",
+    "chatterbox",
+    "narration",
+    "local-first"
+  ],
+  "homepage": "https://github.com/Kminer2053/korean-voice-lab#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kminer2053/korean-voice-lab.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kminer2053/korean-voice-lab/issues"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "korean-voice-lab": "bin/korean-voice-lab.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "app.py",
+    "api.py",
+    "audio_fx.py",
+    "audio_prep.py",
+    "ending.py",
+    "engine.py",
+    "local_env.py",
+    "mcp_server.py",
+    "records.py",
+    "selftest.py",
+    "service.py",
+    "system_probe.py",
+    "textnorm.py",
+    "voicelab_cli.py",
+    "voices.py",
+    "backends/",
+    "tools/",
+    "requirements.txt",
+    "requirements/",
+    "examples/",
+    "lexicon.example.json",
+    "setup.bat",
+    "setup.command",
+    "start.bat",
+    "start.command",
+    "docs/API.md",
+    "docs/ENGINES.md",
+    "AGENTS.md",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/.DS_Store"
+  ]
+}
